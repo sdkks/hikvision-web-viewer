@@ -2,6 +2,16 @@
 (function () {
   "use strict";
 
+  /* [viewer] diagnostics are silent unless debug=1 is in the query string
+     or localStorage.viewerDebug === "1". */
+  var DEBUG = (function () {
+    if (/[?&]debug=1/.test(location.search)) return true;
+    try { return localStorage.viewerDebug === "1"; } catch (e) { return false; }
+  })();
+  function vlog() {
+    if (DEBUG) console.log.apply(console, arguments);
+  }
+
   /* ── MSE plumbing ─────────────────────────────────────────────── */
 
   function pickMediaSourceCtor() {
@@ -150,28 +160,28 @@
       var ms = new MS();
       state.ms = ms;
       video.src = URL.createObjectURL(ms);
-      console.log("[viewer] ms created, mms=" + (MS === window.ManagedMediaSource) + ", codec=" + codec);
+      vlog("[viewer] ms created, mms=" + (MS === window.ManagedMediaSource) + ", codec=" + codec);
       // ManagedMediaSource only opens its source once the element starts playing;
       // kick it immediately (muted autoplay is allowed) to avoid a sourceopen deadlock.
       video.play().catch(function () { /* retried after data arrives */ });
       ms.addEventListener("sourceopen", function () {
         if (state.aborted) return;
-        console.log("[viewer] sourceopen");
+        vlog("[viewer] sourceopen");
         var sb;
         try { sb = ms.addSourceBuffer(codec); }
-        catch (e) { console.log("[viewer] addSourceBuffer threw: " + e); setStatus("err", "Couldn't initialise player buffer."); return; }
+        catch (e) { vlog("[viewer] addSourceBuffer threw: " + e); setStatus("err", "Couldn't initialise player buffer."); return; }
         state.sb = sb;
         sb.addEventListener("updateend", function () { feed(); trimLiveBuffer(); });
-        sb.addEventListener("error", function () { console.log("[viewer] SOURCEBUFFER ERROR"); setStatus("err", "Player buffer error — the camera stream may have changed codecs."); });
-        ms.addEventListener("sourceclose", function () { console.log("[viewer] sourceclose"); });
+        sb.addEventListener("error", function () { vlog("[viewer] SOURCEBUFFER ERROR"); setStatus("err", "Player buffer error — the camera stream may have changed codecs."); });
+        ms.addEventListener("sourceclose", function () { vlog("[viewer] sourceclose"); });
         sb.mode = "segments";
-        console.log("[viewer] sb ready, connecting");
+        vlog("[viewer] sb ready, connecting");
         connect();
       });
     }
 
     async function connect() {
-      console.log("[viewer] connect() fetching " + url);
+      vlog("[viewer] connect() fetching " + url);
       setStatus("connect", opts.live ? "Connecting…" : "Connecting to clip… starts at its beginning.");
       var firstByteSeen = false;
       var initBoxes = [];
@@ -184,18 +194,18 @@
         }
         state.splitter = new BoxSplitter(
           function (initBox) {
-            console.log("[viewer] init box " + initBox.length + "B");
+            vlog("[viewer] init box " + initBox.length + "B");
             initBoxes.push(initBox);
           },
           function (seg) {
             if (!initFlushed) {
               const packed = concat.apply(null, initBoxes);
-              console.log("[viewer] flushing init " + packed.length + "B + seg " + seg.length + "B");
+              vlog("[viewer] flushing init " + packed.length + "B + seg " + seg.length + "B");
               state.queue.push(packed);
               initBoxes = [];
               initFlushed = true;
             } else {
-              console.log("[viewer] seg " + seg.length + "B");
+              vlog("[viewer] seg " + seg.length + "B");
             }
             state.queue.push(seg);
             feed();
@@ -303,6 +313,7 @@
       if (liveState) { liveState.abort(); liveState = null; }
       video.dataset.channel = channel;
       video.dataset.expected = "";
+      video.setAttribute("poster", "/snapshot?ch=" + channel);
       current = channel;
       var codecSet = video.dataset.codecs || (channel === "101" ? "hevc" : "avc");
       liveState = attach(video, "/stream/" + channel, {
@@ -337,8 +348,9 @@
     var counter = document.getElementById("counter");
     var progress = document.getElementById("progress");
     var expected = Number(video.dataset.expected || 0);
-    var t0 = null;
     var ticker = null;
+    var wallclock = false;
+    var lastElapsed = 0;
 
     function fmt(s) {
       s = Math.max(0, Math.floor(s));
@@ -363,18 +375,40 @@
       if (label) label.textContent = m[1];
     }
 
+    function draw(elapsed) {
+      lastElapsed = elapsed;
+      if (counter) counter.textContent = fmt(elapsed) + " / " + fmt(expected);
+      if (progress && expected) progress.style.width = Math.min(100, (elapsed / expected) * 100) + "%";
+      video.dataset.elapsed = String(Math.floor(elapsed));
+    }
+
+    // Preferred clock: the video element. timeupdate only fires while currentTime
+    // moves, so pausing freezes the counter and progress for free.
+    video.addEventListener("timeupdate", function () {
+      if (ticker) { clearInterval(ticker); ticker = null; }
+      wallclock = false;
+      draw(video.currentTime);
+    });
+
     attach(video, video.dataset.url, {
       live: false,
       codecs: CODEC_SETS[video.dataset.codecs] || CODEC_SETS.hevc,
       onStatus: function (kind, text) {
         render(kind, text);
         if (kind === "ok" && !ticker) {
-          t0 = Date.now();
+          // Fallback clock: some MSE paths keep currentTime at 0. Only after
+          // 3 s without movement do we tick from the wall clock — still
+          // pause-aware, so a paused video never advances the counter.
+          var started = Date.now();
+          var anchor = started;
           ticker = setInterval(function () {
-            var elapsed = (Date.now() - t0) / 1000;
-            if (counter) counter.textContent = fmt(elapsed) + " / " + fmt(expected);
-            if (progress && expected) progress.style.width = Math.min(100, (elapsed / expected) * 100) + "%";
-            if (video.dataset.elapsed) video.dataset.elapsed = String(Math.floor(elapsed));
+            if (!wallclock) {
+              if (video.currentTime > 0 || Date.now() - started < 3000) return;
+              wallclock = true;
+              anchor = Date.now() - lastElapsed * 1000;
+            }
+            if (video.paused) { anchor = Date.now() - lastElapsed * 1000; return; }
+            draw((Date.now() - anchor) / 1000);
           }, 1000);
         }
       },
@@ -397,6 +431,7 @@
     });
 
     document.querySelectorAll(".copybtn").forEach(function (btn) {
+      btn.setAttribute("aria-live", "polite");
       btn.addEventListener("click", function () {
         var target = document.querySelector(btn.dataset.target);
         if (target) navigator.clipboard && navigator.clipboard.writeText(target.textContent.trim());

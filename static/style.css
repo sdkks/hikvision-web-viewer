@@ -12,6 +12,7 @@
   --err: #ff5d5d;
   --radius: 8px;
   --pill: 22px;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -116,6 +117,12 @@ button.chan[aria-pressed="true"] { border-color: var(--accent); color: var(--acc
 
 .fallback { margin-top: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
 
+.fallback a {
+  min-height: 44px; padding: 10px 14px; border-radius: var(--pill);
+  border: 1px solid var(--border); color: var(--accent);
+  display: inline-flex; align-items: center;
+}
+
 /* ── recordings ────────────────────────────────────────────────── */
 .presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
 
@@ -171,14 +178,14 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 }
 
 .clip details { margin-top: 10px; }
-.clip summary { cursor: pointer; color: var(--text-dim); min-height: 36px; display: flex; align-items: center; }
+.clip summary { cursor: pointer; color: var(--text-dim); min-height: 44px; display: flex; align-items: center; }
 .clip pre {
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 8px 10px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all;
 }
 
 .copybtn {
-  margin: 6px 0 0; min-height: 36px; padding: 4px 14px; border-radius: var(--pill);
+  margin: 6px 0 0; min-height: 44px; padding: 4px 14px; border-radius: var(--pill);
   border: 1px solid var(--border); background: transparent; color: var(--accent); font: inherit;
   cursor: pointer;
 }
@@ -195,6 +202,8 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 .endnote .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 
 /* ── footer ────────────────────────────────────────────────────── */
+.foot a { display: inline-flex; align-items: center; min-height: 44px; padding: 10px 0; }
+
 .foot {
   max-width: 960px; margin: 26px auto 0; padding: 0 16px;
   color: var(--text-dim); font-size: 13px;

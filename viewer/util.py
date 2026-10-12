@@ -46,7 +46,7 @@ def iso_search_time(dt: datetime) -> str:
 
 
 def local_display(dt: datetime) -> str:
-    return dt.astimezone().strftime("%a %H:%M:%S")
+    return dt.astimezone().strftime("%a %d %b %H:%M")
 
 
 def human_duration(seconds: int) -> str:

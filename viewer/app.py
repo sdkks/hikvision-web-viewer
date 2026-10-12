@@ -25,12 +25,20 @@ class ViewerApp:
     def footer_line(self) -> str:
         try:
             sd = self.cam.storage()
-            return (
+            line = (
                 f"SD {util.human_size(sd['free_mb'] * 1024 * 1024)} free of "
                 f"{util.human_size(sd['capacity_mb'] * 1024 * 1024)}"
             )
         except camera.CameraError:
-            return "SD storage: unavailable (camera app layer down)"
+            line = "SD storage: unavailable (camera app layer down)"
+        try:
+            info = self.cam.device_info()
+            fw = f"{info.get('firmwareVersion', '')} {info.get('firmwareReleasedDate', '')}".strip()
+            if fw:
+                line += f" · fw {fw}"
+        except camera.CameraError:
+            pass
+        return line
 
     def render(self, handler, title: str, content: str, nav: str, code: int = 200) -> None:
         active = {
@@ -153,17 +161,23 @@ class ViewerApp:
         items = []
         for clip in clips[:100]:
             start_local = util.local_display(clip.start_dt)
-            size_h = util.human_size(clip.size)
+            end_local = util.local_display(clip.end_dt)
+            dur_h = util.human_duration(clip.duration_s)
+            size_h = util.human_size(clip.size) if clip.size else ""
+            meta = f"{dur_h} &middot; {size_h}" if size_h else dur_h
             from_cam = util.to_cam_time(clip.start_dt)
             to_cam = util.to_cam_time(clip.end_dt)
-            play_href = f"/play?from={esc(from_cam)}&amp;to={esc(to_cam)}&amp;dur={clip.duration_s}"
+            play_href = (
+                f"/play?from={esc(from_cam)}&amp;to={esc(to_cam)}&amp;dur={clip.duration_s}"
+                f"&amp;size={clip.size}"
+            )
             ffmpeg_cmd = (
                 f'ffmpeg -rtsp_transport tcp -i "{clip.uri}" -c copy "clip_{clip.start_utc}.mp4"'
             )
             items.append(
                 f"<li class='clip'><div class='times'>{esc(start_local)} &rarr; "
-                f"{util.human_duration(clip.duration_s)}</div>"
-                f"<div class='meta'>{size_h}</div>"
+                f"{esc(end_local)}</div>"
+                f"<div class='meta'>{meta}</div>"
                 f"<a class='playbtn' href='{play_href}'>&#9654; Play</a>"
                 f"<details><summary>rtsp URI &middot; ffmpeg</summary>"
                 f"<pre id='u{clip.start_utc}'>{esc(clip.uri)}</pre>"
@@ -174,9 +188,10 @@ class ViewerApp:
             )
 
         n = len(clips)
+        noun = "clip" if n == 1 else "clips"
         range_label = f"{util.local_display(frm_dt)} and {util.local_display(to_dt)}"
         return (
-            f"<p><b>{n}</b> clip(s) between {esc(range_label)}</p>{overflow}"
+            f"<p><b>{n}</b> {noun} between {esc(range_label)}</p>{overflow}"
             f"<ul class='clips'>{''.join(items)}</ul>"
             "<p class='muted'>Times shown in the server's timezone; the camera stores UTC.</p>"
         )
@@ -200,13 +215,18 @@ class ViewerApp:
                 code=400,
             )
             return
-        minutes, secs = divmod(dur_s, 60)
-        dur_mmss = f"{minutes:02d}:{secs:02d}"
+        # Match the JS counter format: h:mm:ss once over an hour, m:ss below.
+        m, secs = divmod(dur_s, 60)
+        h, m = divmod(m, 60)
+        dur_mmss = f"{h}:{m:02d}:{secs:02d}" if h else f"{m}:{secs:02d}"
+        size_raw = (query.get("size", [""])[0] or "").strip()
+        size = int(size_raw) if size_raw.isdigit() else 0
+        size_part = f" &middot; {util.human_size(size)}" if size else ""
         content = templates.PLAY.substitute(
             start_local=esc(util.local_display(start_dt)),
             end_local=esc(util.local_display(end_dt)),
             dur_h=util.human_duration(dur_s),
-            size_h="",
+            size_part=size_part,
             dur_s=dur_s,
             from_cam=esc(from_cam),
             to_cam=esc(to_cam),

@@ -35,12 +35,12 @@ LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
 <button type="button" class="chan" data-channel="102" aria-pressed="$p_sub">Sub 360p &middot; lighter</button>
 </div>
 <p id="status-line" class="status" role="status"><span class="dot spin"></span><span class="label">Connecting&hellip;</span></p>
-<button id="retry" type="button" class="retry" hidden>Retry now</button>
 <div class="fallback">
 <noscript><p>JavaScript is off, so live video can't load. Still images work:</p></noscript>
 <a href="/snapshot?ch=101">Still image (main)</a>
 <a href="/snapshot?ch=102">Still image (sub)</a>
 </div>
+<button id="retry" type="button" class="retry" hidden>Retry now</button>
 """
 
 RECORDINGS = """<h1>Recordings</h1>
@@ -64,7 +64,7 @@ $results
 """
 
 PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
-<h1>Clip &middot; $start_local &rarr; $end_local <span class="muted">($dur_h, $size_h)</span></h1>
+<h1>Clip &middot; $start_local &rarr; $end_local <span class="muted">($dur_h$size_part)</span></h1>
 <div class="videowrap">
 <video id="clip-video" autoplay muted playsinline controls data-codecs="hevc"
        data-url="/playback-stream?from=$from_cam&amp;to=$to_cam" data-expected="$dur_s"></video>
@@ -73,6 +73,6 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <p class="fallback"><a href="/snapshot?ch=101">Still image (main)</a><a href="/snapshot?ch=102">Still image (sub)</a></p>
 <p id="status-line" class="status" role="status"><span class="dot spin"></span><span class="label">Connecting to clip&hellip; starts at its beginning.</span></p>
 <p id="counter" class="counter muted">00:00 / $dur_mmss</p>
-<div class="progresswrap"><div id="progress" class="progress"></div></div>
+<div class="progresswrap" aria-hidden="true"><div id="progress" class="progress"></div></div>
 <div id="endnote" class="endnote" hidden></div>
 """)
