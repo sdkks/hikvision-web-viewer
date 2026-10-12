@@ -1,0 +1,364 @@
+"""HTTP server: pages, ISAPI proxying, and ffmpeg-backed fMP4 streaming."""
+
+import html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+from . import camera, config, streams, templates, util
+
+CHANNELS = ("101", "102")
+
+
+def esc(value: str) -> str:
+    return html.escape(str(value), quote=True)
+
+
+class ViewerApp:
+    def __init__(self):
+        self.cam = camera.make_camera()
+
+    # ── page fragments ───────────────────────────────────────────────
+    def footer_line(self) -> str:
+        try:
+            sd = self.cam.storage()
+            return (
+                f"SD {util.human_size(sd['free_mb'] * 1024 * 1024)} free of "
+                f"{util.human_size(sd['capacity_mb'] * 1024 * 1024)}"
+            )
+        except camera.CameraError:
+            return "SD storage: unavailable (camera app layer down)"
+
+    def render(self, handler, title: str, content: str, nav: str, code: int = 200) -> None:
+        active = {
+            "nav_live": "page" if nav == "live" else "",
+            "nav_rec": "page" if nav == "recordings" else "",
+        }
+        page = templates.BASE.substitute(
+            title=esc(title),
+            brand=esc(config.CAM_HOST),
+            content=content,
+            footer=self.footer_line(),
+            **active,
+        )
+        data = page.encode()
+        handler.send_response(code)
+        handler.send_header("Content-Type", "text/html; charset=utf-8")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    # ── pages ────────────────────────────────────────────────────────
+    def page_live(self, handler):
+        content = templates.LIVE.replace("$channel", "101")
+        content = content.replace("$p_main", "true").replace("$p_sub", "false")
+        self.render(handler, "Live", content, nav="live")
+
+    def page_recordings(self, handler, query: dict):
+        preset = (query.get("preset", [""])[0] or "").strip()
+        frm_raw = (query.get("from", [""])[0] or "").strip()
+        to_raw = (query.get("to", [""])[0] or "").strip()
+
+        now = util.datetime_now()
+        defaults = {
+            "from": (now.replace(hour=0, minute=0, second=0, microsecond=0)).strftime(
+                "%Y-%m-%dT%H:%M"
+            ),
+            "to": now.strftime("%Y-%m-%dT%H:%M"),
+        }
+        from_val, to_val = frm_raw or defaults["from"], to_raw or defaults["to"]
+        details_open = "open" if (frm_raw or to_raw) else ""
+
+        if preset:
+            windows = {
+                "today": (None, True),
+                "24h": (24, False),
+                "3d": (72, False),
+                "7d": (168, False),
+            }
+            if preset in windows:
+                hours, midnight = windows[preset]
+                frm_dt, to_dt = util.relative_preset(hours, midnight)
+                from_val, to_val = (
+                    frm_dt.strftime("%Y-%m-%dT%H:%M"),
+                    to_dt.strftime("%Y-%m-%dT%H:%M"),
+                )
+
+        results = (
+            "<p class='muted'>Choose a range to search. Recordings are motion-triggered clips.</p>"
+        )
+        code = 200
+        if "searched" in query or frm_raw or preset:
+            results = self.run_search(from_val, to_val)
+            if isinstance(results, tuple):
+                results, code = results
+
+        content = (
+            templates.RECORDINGS.replace("$details_open", details_open)
+            .replace("$from_val", esc(from_val))
+            .replace("$to_val", esc(to_val))
+            .replace("$results", results)
+        )
+        self.render(handler, "Recordings", content, nav="recordings", code=code)
+
+    def run_search(self, from_val: str, to_val: str):
+        """Search and render results. Returns html str, or (html, http_code) on failure."""
+        try:
+            frm_dt, to_dt = util.parse_user_range(from_val, to_val)
+        except ValueError as exc:
+            card = (
+                f"<div class='errcard'><p>{esc(exc)}</p>"
+                f"<p class='muted'>Range is kept — adjust and search again.</p></div>"
+            )
+            return card, 400
+
+        try:
+            clips = self.cam.search(util.iso_search_time(frm_dt), util.iso_search_time(to_dt))
+        except camera.UnreachableError as exc:
+            card = (
+                f"<div class='errcard'><p>Camera unreachable at {esc(config.CAM_HOST)}.</p>"
+                f"<p class='muted'>{esc(exc)}</p></div>"
+            )
+            return card, 502
+        except camera.ServiceDownError:
+            card = (
+                "<div class='errcard'><p>The camera's search service isn't responding "
+                "(this camera's search is known to be flaky). Live view and clip playback "
+                "still work — try again in a moment.</p>"
+                "<a class='retry' style='display:inline-flex;align-items:center;"
+                "text-decoration:none' "
+                f"href='/recordings?from={esc(from_val)}&amp;to={esc(to_val)}&amp;searched=1'>"
+                "Retry</a></div>"
+            )
+            return card, 503
+        except camera.BadResponseError:
+            card = (
+                "<div class='errcard'><p>The camera gave an unexpected search reply "
+                "(possible firmware drift). Live view still works.</p></div>"
+            )
+            return card, 502
+
+        if not clips:
+            return "<p>No recordings in this range.</p>"
+
+        overflow = ""
+        if len(clips) >= 100:
+            overflow = "<p class='muted'>Showing first 100 — narrow the range to see more.</p>"
+
+        items = []
+        for clip in clips[:100]:
+            start_local = util.local_display(clip.start_dt)
+            size_h = util.human_size(clip.size)
+            from_cam = util.to_cam_time(clip.start_dt)
+            to_cam = util.to_cam_time(clip.end_dt)
+            play_href = f"/play?from={esc(from_cam)}&amp;to={esc(to_cam)}&amp;dur={clip.duration_s}"
+            ffmpeg_cmd = (
+                f'ffmpeg -rtsp_transport tcp -i "{clip.uri}" -c copy "clip_{clip.start_utc}.mp4"'
+            )
+            items.append(
+                f"<li class='clip'><div class='times'>{esc(start_local)} &rarr; "
+                f"{util.human_duration(clip.duration_s)}</div>"
+                f"<div class='meta'>{size_h}</div>"
+                f"<a class='playbtn' href='{play_href}'>&#9654; Play</a>"
+                f"<details><summary>rtsp URI &middot; ffmpeg</summary>"
+                f"<pre id='u{clip.start_utc}'>{esc(clip.uri)}</pre>"
+                f"<button type='button' class='copybtn' data-target='#u{clip.start_utc}'>Copy URI</button>"
+                f"<pre id='f{clip.start_utc}'>{esc(ffmpeg_cmd)}</pre>"
+                f"<button type='button' class='copybtn' data-target='#f{clip.start_utc}'>Copy ffmpeg</button>"
+                f"</details></li>"
+            )
+
+        n = len(clips)
+        range_label = f"{util.local_display(frm_dt)} to {util.local_display(to_dt)}"
+        return (
+            f"<p><b>{n}</b> clip(s) between {esc(range_label)}</p>{overflow}"
+            f"<ul class='clips'>{''.join(items)}</ul>"
+            "<p class='muted'>Times shown in the server's timezone; the camera stores UTC.</p>"
+        )
+
+    def page_play(self, handler, query: dict):
+        from_cam = (query.get("from", [""])[0] or "").strip()
+        to_cam = (query.get("to", [""])[0] or "").strip()
+        try:
+            start_dt = util.parse_cam_time(from_cam)
+            end_dt = util.parse_cam_time(to_cam)
+            dur_s = max(1, int((end_dt - start_dt).total_seconds()))
+        except ValueError:
+            self.render(
+                handler,
+                "Clip",
+                "<div class='errcard'><p>Bad clip parameters.</p>"
+                "<a class='retry' href='/recordings' "
+                "style='display:inline-flex;align-items:center;"
+                "text-decoration:none'>&larr; Results</a></div>",
+                nav="recordings",
+                code=400,
+            )
+            return
+        minutes, secs = divmod(dur_s, 60)
+        dur_mmss = f"{minutes:02d}:{secs:02d}"
+        content = templates.PLAY.substitute(
+            start_local=esc(util.local_display(start_dt)),
+            end_local=esc(util.local_display(end_dt)),
+            dur_h=util.human_duration(dur_s),
+            size_h="",
+            dur_s=dur_s,
+            from_cam=esc(from_cam),
+            to_cam=esc(to_cam),
+            dur_mmss=dur_mmss,
+        )
+        self.render(handler, "Playback", content, nav="recordings")
+
+    # ── streams & data ───────────────────────────────────────────────
+    def stream_response(self, handler, proc):
+        """Pipe ffmpeg stdout to the client as a close-delimited fMP4 stream."""
+        handler.send_response(200)
+        handler.send_header("Content-Type", "video/mp4")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+
+        def write_chunk(chunk: bytes) -> None:
+            handler.wfile.write(chunk)
+            handler.wfile.flush()
+
+        try:
+            streams.pump(proc, write_chunk)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass  # client went away or startup timeout; pump() already killed ffmpeg
+
+    def route_stream(self, handler, channel: str, query: dict):
+        if channel not in CHANNELS:
+            handler.send_error(404)
+            return
+        try:
+            proc = streams.start_live(channel)
+        except FileNotFoundError:
+            handler.send_error(503, "ffmpeg not found on the server")
+            return
+        self.stream_response(handler, proc)
+
+    def route_playback_stream(self, handler, query: dict):
+        from_cam = (query.get("from", [""])[0] or "").strip()
+        to_cam = (query.get("to", [""])[0] or "").strip()
+        if not (util._CAM_RE.match(from_cam) and util._CAM_RE.match(to_cam)):
+            handler.send_error(400, "bad clip window")
+            return
+        duration = 0
+        try:
+            duration = int(
+                (util.parse_cam_time(to_cam) - util.parse_cam_time(from_cam)).total_seconds()
+            )
+        except ValueError:
+            handler.send_error(400, "bad clip window")
+            return
+        url = streams.build_playback_url(from_cam, to_cam)
+        try:
+            proc = streams.start_playback(url, duration)
+        except FileNotFoundError:
+            handler.send_error(503, "ffmpeg not found on the server")
+            return
+        self.stream_response(handler, proc)
+
+    def route_snapshot(self, handler, query: dict):
+        channel = query.get("ch", ["101"])[0] or "101"
+        if channel not in CHANNELS:
+            handler.send_error(404)
+            return
+        try:
+            if config.MOCK:
+                jpeg = streams.mock_snapshot_jpeg()
+            else:
+                jpeg = self.cam.snapshot_jpeg(channel)
+        except camera.CameraError as exc:
+            handler.send_error(502, f"snapshot failed: {exc}")
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "image/jpeg")
+        handler.send_header("Content-Length", str(len(jpeg)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(jpeg)
+
+    def route_isapi(self, handler, path: str):
+        try:
+            text = self.cam._get(path)
+        except camera.UnreachableError as exc:
+            self.render(
+                handler,
+                "ISAPI",
+                f"<div class='errcard'><p>{esc(exc)}</p></div>",
+                nav="live",
+                code=502,
+            )
+            return
+        except camera.CameraError as exc:
+            self.render(
+                handler,
+                "ISAPI",
+                f"<div class='errcard'><p>{esc(exc)}</p></div>",
+                nav="live",
+                code=502,
+            )
+            return
+        self.render(
+            handler,
+            f"ISAPI {esc(path)}",
+            f"<h2>GET {esc(path)}</h2><pre>{esc(text[:20000])}</pre>",
+            nav="live",
+        )
+
+    # ── dispatch ─────────────────────────────────────────────────────
+    def dispatch(self, handler):
+        parsed = urlparse(handler.path)
+        path = parsed.path
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if path == "/":
+            return self.page_live(handler)
+        if path == "/recordings":
+            return self.page_recordings(handler, query)
+        if path == "/play":
+            return self.page_play(handler, query)
+        if path.startswith("/stream/"):
+            return self.route_stream(handler, path.rsplit("/", 1)[-1], query)
+        if path == "/playback-stream":
+            return self.route_playback_stream(handler, query)
+        if path == "/snapshot":
+            return self.route_snapshot(handler, query)
+        if path.startswith("/isapi/"):
+            return self.route_isapi(handler, path[len("/isapi") :])
+        if path == "/healthz":
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/plain")
+            handler.end_headers()
+            handler.wfile.write(b"ok")
+            return
+        handler.send_error(404)
+
+
+def make_handler(app: ViewerApp):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):  # quiet unless things break
+            pass
+
+        def do_GET(self):
+            app.dispatch(self)
+
+    return Handler
+
+
+def run() -> None:
+    app = ViewerApp()
+    server = ThreadingHTTPServer((config.BIND_HOST, config.BIND_PORT), make_handler(app))
+    server.daemon_threads = True
+    mode = "MOCK" if config.MOCK else f"camera {config.CAM_HOST}"
+    print(f"hikvision-web-viewer on http://{config.BIND_HOST}:{config.BIND_PORT} ({mode})")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    run()
