@@ -305,7 +305,7 @@ class ViewerApp:
 
     def route_isapi(self, handler, path: str):
         try:
-            text = self.cam._get(path)
+            text = self.cam._get("/ISAPI" + path)
         except camera.UnreachableError as exc:
             self.render(
                 handler,

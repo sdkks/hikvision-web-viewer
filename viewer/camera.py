@@ -210,6 +210,30 @@ class MockCamera(Camera):
 
         return streams.mock_snapshot_jpeg()
 
+    _CANNED = {
+        "/ISAPI/System/deviceInfo": (
+            "<DeviceInfo><model>DS-2CV2121G2-IDW</model>"
+            "<SerialNumber>MOCKSERIAL20241107AAWRFS0000001</SerialNumber>"
+            "<firmwareVersion>V5.7.26</firmwareVersion>"
+            "<firmwareReleasedDate>build260827</firmwareReleasedDate></DeviceInfo>"
+        ),
+        "/ISAPI/System/status": (
+            "<DeviceStatus><deviceUpTime>4242</deviceUpTime>"
+            "<cpuUtilization>37</cpuUtilization><memoryUsage>81</memoryUsage>"
+            "<memoryAvailable>8123</memoryAvailable></DeviceStatus>"
+        ),
+        "/ISAPI/ContentMgmt/Storage": (
+            "<storage><hddList><hdd><id>1</id><status>ok</status>"
+            "<capacity>244016</capacity><freeSpace>231500</freeSpace>"
+            "<property>RW</property></hdd></hddList></storage>"
+        ),
+    }
+
+    def _get(self, path: str) -> str:
+        if path in self._CANNED:
+            return self._CANNED[path]
+        raise ServiceDownError(f"mock has no fixture for {path}")
+
 
 def parse_search_response(xml_text: str, rtsp_base: str) -> list[Clip]:
     """Parse /ISAPI/ContentMgmt/search replies; raise BadResponseError on protocol drift."""
