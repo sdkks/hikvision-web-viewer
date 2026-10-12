@@ -20,7 +20,7 @@ BASE = Template("""<!doctype html>
 $content
 </main>
 <footer class="foot"><span>$footer</span><span>Advanced: <a href="/isapi/System/deviceInfo">raw ISAPI</a></span></footer>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>
 """)
@@ -41,7 +41,6 @@ LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
 <a href="/snapshot?ch=101">Still image (main)</a>
 <a href="/snapshot?ch=102">Still image (sub)</a>
 </div>
-<script>window.addEventListener('DOMContentLoaded',function(){var v=document.getElementById('live-video');if(window.__initLive)window.__initLive(v);});</script>
 """
 
 RECORDINGS = """<h1>Recordings</h1>
@@ -64,16 +63,16 @@ RECORDINGS = """<h1>Recordings</h1>
 $results
 """
 
-PLAY = """<a class="back" href="/recordings">&larr; Results</a>
+PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <h1>Clip &middot; $start_local &rarr; $end_local <span class="muted">($dur_h, $size_h)</span></h1>
 <div class="videowrap">
 <video id="clip-video" autoplay muted playsinline controls
        data-url="/playback-stream?from=$from_cam&amp;to=$to_cam" data-expected="$dur_s"></video>
 </div>
 <p class="honest">Plays in real time &mdash; a $dur_h clip takes $dur_h. No seeking.</p>
+<p class="fallback"><a href="/snapshot?ch=101">Still image (main)</a><a href="/snapshot?ch=102">Still image (sub)</a></p>
 <p id="status-line" class="status" role="status"><span class="dot spin"></span><span class="label">Connecting to clip&hellip; starts at its beginning.</span></p>
 <p id="counter" class="counter muted">00:00 / $dur_mmss</p>
 <div class="progresswrap"><div id="progress" class="progress"></div></div>
 <div id="endnote" class="endnote" hidden></div>
-<script>window.addEventListener('DOMContentLoaded',function(){var v=document.getElementById('clip-video');if(window.__initPlayback)window.__initPlayback(v);});</script>
-"""
+""")

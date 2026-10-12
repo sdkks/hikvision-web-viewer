@@ -2,9 +2,13 @@
 
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import camera, config, streams, templates, util
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+STATIC_TYPES = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml"}
 
 CHANNELS = ("101", "102")
 
@@ -168,7 +172,7 @@ class ViewerApp:
             )
 
         n = len(clips)
-        range_label = f"{util.local_display(frm_dt)} to {util.local_display(to_dt)}"
+        range_label = f"{util.local_display(frm_dt)} and {util.local_display(to_dt)}"
         return (
             f"<p><b>{n}</b> clip(s) between {esc(range_label)}</p>{overflow}"
             f"<ul class='clips'>{''.join(items)}</ul>"
@@ -259,6 +263,24 @@ class ViewerApp:
             return
         self.stream_response(handler, proc)
 
+    def route_static(self, handler, name: str):
+        if "/" in name or ".." in name or not name:
+            handler.send_error(404)
+            return
+        file_path = STATIC_DIR / name
+        if not file_path.is_file():
+            handler.send_error(404)
+            return
+        data = file_path.read_bytes()
+        handler.send_response(200)
+        handler.send_header(
+            "Content-Type", STATIC_TYPES.get(file_path.suffix, "application/octet-stream")
+        )
+        handler.send_header("Content-Length", str(len(data)))
+        handler.send_header("Cache-Control", "no-cache")
+        handler.end_headers()
+        handler.wfile.write(data)
+
     def route_snapshot(self, handler, query: dict):
         channel = query.get("ch", ["101"])[0] or "101"
         if channel not in CHANNELS:
@@ -326,6 +348,8 @@ class ViewerApp:
             return self.route_snapshot(handler, query)
         if path.startswith("/isapi/"):
             return self.route_isapi(handler, path[len("/isapi") :])
+        if path.startswith("/static/"):
+            return self.route_static(handler, path[len("/static/") :])
         if path == "/healthz":
             handler.send_response(200)
             handler.send_header("Content-Type", "text/plain")

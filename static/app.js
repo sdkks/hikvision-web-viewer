@@ -10,20 +10,37 @@
     return null;
   }
 
-  function pickCodec() {
-    var msCtor = pickMediaSourceCtor();
+  async function canDecodeInPractice(codecString) {
+    // MediaSource.isTypeSupported over-reports (e.g. HEVC on Chrome without a decoder).
+    // WebCodecs' isConfigSupported reflects what can actually decode here.
+    if (window.VideoDecoder && VideoDecoder.isConfigSupported) {
+      try {
+        const r = await VideoDecoder.isConfigSupported({ codec: codecString });
+        if (r && r.supported === false) return false;
+      } catch (e) { /* keep optimistic */ }
+    }
+    return true;
+  }
+
+  async function pickCodec(candidates) {
+    const msCtor = pickMediaSourceCtor();
     if (!msCtor || !msCtor.isTypeSupported) return null;
-    var candidates = [
-      'video/mp4; codecs="hvc1.1.6.L93.B0"',
-      'video/mp4; codecs="hvc1.1.6.L120.90"',
-      'video/mp4; codecs="avc1.640029"',
-      'video/mp4; codecs="avc1.42E01E"',
-    ];
-    for (var i = 0; i < candidates.length; i++) {
-      if (msCtor.isTypeSupported(candidates[i])) return candidates[i];
+    for (const candidate of candidates) {
+      if (msCtor.isTypeSupported(candidate) && (await canDecodeInPractice(candidate))) {
+        return candidate;
+      }
     }
     return null;
   }
+
+  var CODEC_SETS = {
+    // Main channel is H.265 on this camera: HEVC-first (Safari), AVC fallback (transcoded cams).
+    hevc: ['video/mp4; codecs="hvc1.1.6.L93.B0"', 'video/mp4; codecs="hvc1.1.6.L120.90"',
+           'video/mp4; codecs="avc1.640029"', 'video/mp4; codecs="avc1.42E01E"'],
+    // Sub channel / H.264 sources: AVC-first.
+    avc: ['video/mp4; codecs="avc1.640029"', 'video/mp4; codecs="avc1.42E01E"',
+          'video/mp4; codecs="hvc1.1.6.L93.B0"'],
+  };
 
   /* Split an fMP4 byte stream into MSE-ready segments:
      init segment = boxes before the first moof; each media segment = moof + trailing boxes. */
@@ -114,9 +131,17 @@
       }
     }
 
-    function openSource() {
+    function trimLiveBuffer() {
+      if (!opts.live || !state.sb || state.sb.updating) return;
+      try {
+        var end = state.sb.buffered.length ? state.sb.buffered.end(0) : 0;
+        if (end > 60) state.sb.remove(0, end - 30);
+      } catch (e) { /* buffered can be empty between appends */ }
+    }
+
+    async function openSource() {
       var MS = pickMediaSourceCtor();
-      var codec = pickCodec();
+      var codec = await pickCodec(opts.codecs || CODEC_SETS.avc);
       if (!MS || !codec) {
         setStatus("nosupport",
           "This browser can't decode the camera stream. Use the still-image links below.");
@@ -125,24 +150,32 @@
       var ms = new MS();
       state.ms = ms;
       video.src = URL.createObjectURL(ms);
+      console.log("[viewer] ms created, mms=" + (MS === window.ManagedMediaSource) + ", codec=" + codec);
+      // ManagedMediaSource only opens its source once the element starts playing;
+      // kick it immediately (muted autoplay is allowed) to avoid a sourceopen deadlock.
+      video.play().catch(function () { /* retried after data arrives */ });
       ms.addEventListener("sourceopen", function () {
         if (state.aborted) return;
+        console.log("[viewer] sourceopen");
         var sb;
         try { sb = ms.addSourceBuffer(codec); }
-        catch (e) { setStatus("err", "Couldn't initialise player buffer."); return; }
+        catch (e) { console.log("[viewer] addSourceBuffer threw: " + e); setStatus("err", "Couldn't initialise player buffer."); return; }
         state.sb = sb;
-        sb.addEventListener("updateend", feed);
+        sb.addEventListener("updateend", function () { feed(); trimLiveBuffer(); });
+        sb.addEventListener("error", function () { console.log("[viewer] SOURCEBUFFER ERROR"); setStatus("err", "Player buffer error — the camera stream may have changed codecs."); });
+        ms.addEventListener("sourceclose", function () { console.log("[viewer] sourceclose"); });
         sb.mode = "segments";
-        if (ms.liveSeekable !== undefined && opts.live && ms.setLiveSeekableRange) {
-          try { ms.setLiveSeekableRange(0, Infinity); } catch (e) { /* optional */ }
-        }
+        console.log("[viewer] sb ready, connecting");
         connect();
       });
     }
 
     async function connect() {
+      console.log("[viewer] connect() fetching " + url);
       setStatus("connect", opts.live ? "Connecting…" : "Connecting to clip… starts at its beginning.");
       var firstByteSeen = false;
+      var initBoxes = [];
+      var initFlushed = false;
       try {
         var res = await fetch(url, { signal: state.controller.signal, cache: "no-store" });
         if (!res.ok || !res.body) {
@@ -151,10 +184,20 @@
         }
         state.splitter = new BoxSplitter(
           function (initBox) {
-            if (state.sb && !state.queue.length) state.queue.push(initBox);
+            console.log("[viewer] init box " + initBox.length + "B");
+            initBoxes.push(initBox);
           },
           function (seg) {
-            if (state.sb) state.queue.push(seg);
+            if (!initFlushed) {
+              const packed = concat.apply(null, initBoxes);
+              console.log("[viewer] flushing init " + packed.length + "B + seg " + seg.length + "B");
+              state.queue.push(packed);
+              initBoxes = [];
+              initFlushed = true;
+            } else {
+              console.log("[viewer] seg " + seg.length + "B");
+            }
+            state.queue.push(seg);
             feed();
           }
         );
@@ -212,6 +255,20 @@
       try { if (state.ms && state.ms.endOfSession) state.ms.endOfSession(); } catch (e) { /* noop */ }
     };
 
+    state.debug = function () {
+      var ranges = null;
+      try {
+        ranges = state.sb && state.sb.buffered.length
+          ? [state.sb.buffered.start(0), state.sb.buffered.end(0)] : null;
+      } catch (e) { /* noop */ }
+      return { sbAttached: !!state.sb, queueLen: state.queue.length,
+               msState: state.ms ? state.ms.readyState : null, buffered: ranges,
+               attempts: state.attempts, aborted: state.aborted,
+               videoReady: video.readyState, videoPaused: video.paused,
+               videoErr: video.error ? String(video.error.code) : null };
+    };
+    window.__streamState = state;
+
     openSource();
     return state;
   }
@@ -249,6 +306,7 @@
       current = channel;
       liveState = attach(video, "/stream/" + channel, {
         live: true,
+        codecs: CODEC_SETS[channel === "101" ? "hevc" : "avc"],
         onStatus: function (kind, text) { render(kind, text); },
       });
     }
@@ -306,8 +364,9 @@
 
     attach(video, video.dataset.url, {
       live: false,
-      onStatus: function (kind) {
-        render(kind);
+      codecs: CODEC_SETS.hevc,
+      onStatus: function (kind, text) {
+        render(kind, text);
         if (kind === "ok" && !ticker) {
           t0 = Date.now();
           ticker = setInterval(function () {
