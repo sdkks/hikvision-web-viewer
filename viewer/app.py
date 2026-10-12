@@ -55,6 +55,8 @@ class ViewerApp:
     def page_live(self, handler):
         content = templates.LIVE.replace("$channel", "101")
         content = content.replace("$p_main", "true").replace("$p_sub", "false")
+        # Codec hint: the mock encodes H.264; the real camera's main channel is H.265.
+        content = content.replace("$codec_set", "avc" if config.MOCK else "hevc")
         self.render(handler, "Live", content, nav="live")
 
     def page_recordings(self, handler, query: dict):

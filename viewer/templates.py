@@ -20,14 +20,14 @@ BASE = Template("""<!doctype html>
 $content
 </main>
 <footer class="foot"><span>$footer</span><span>Advanced: <a href="/isapi/System/deviceInfo">raw ISAPI</a></span></footer>
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>
 """)
 
 LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
 <div class="videowrap">
-<video id="live-video" data-channel="$channel" autoplay muted playsinline controls
+<video id="live-video" data-channel="$channel" data-codecs="$codec_set" autoplay muted playsinline controls
        poster="/snapshot?ch=$channel"></video>
 </div>
 <div class="channelbar" role="group" aria-label="Channel">
@@ -66,7 +66,7 @@ $results
 PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <h1>Clip &middot; $start_local &rarr; $end_local <span class="muted">($dur_h, $size_h)</span></h1>
 <div class="videowrap">
-<video id="clip-video" autoplay muted playsinline controls
+<video id="clip-video" autoplay muted playsinline controls data-codecs="hevc"
        data-url="/playback-stream?from=$from_cam&amp;to=$to_cam" data-expected="$dur_s"></video>
 </div>
 <p class="honest">Plays in real time &mdash; a $dur_h clip takes $dur_h. No seeking.</p>

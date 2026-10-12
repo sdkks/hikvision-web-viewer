@@ -304,9 +304,10 @@
       video.dataset.channel = channel;
       video.dataset.expected = "";
       current = channel;
+      var codecSet = video.dataset.codecs || (channel === "101" ? "hevc" : "avc");
       liveState = attach(video, "/stream/" + channel, {
         live: true,
-        codecs: CODEC_SETS[channel === "101" ? "hevc" : "avc"],
+        codecs: CODEC_SETS[codecSet] || CODEC_SETS.avc,
         onStatus: function (kind, text) { render(kind, text); },
       });
     }
@@ -364,7 +365,7 @@
 
     attach(video, video.dataset.url, {
       live: false,
-      codecs: CODEC_SETS.hevc,
+      codecs: CODEC_SETS[video.dataset.codecs] || CODEC_SETS.hevc,
       onStatus: function (kind, text) {
         render(kind, text);
         if (kind === "ok" && !ticker) {
