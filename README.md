@@ -153,10 +153,13 @@ other models.
   keep the default namespace (`xmlns="http://www.hikvision.com/ver20/XMLSchema"`); a
   body serialised with `ns0:` prefixes is rejected with `400`.
 - **Detection and recording mode are separate.** `/ISAPI/ContentMgmt/record/tracks`
-  shows the track schedule, and on this camera track 101 records continuously (`CMR`)
-  around the clock — hence the large clips. Turning motion detection on does **not** by
-  itself make recording motion-triggered; that is a change to the recording mode, and
-  the viewer does not make it for you.
+  shows the track schedule, and that schedule is where the recording mode lives: this
+  camera shipped recording continuously (`CMR`) around the clock, which is why the older
+  clips are large. Each day's window can instead be set to `MOTION`, after which a clip
+  begins only when motion lands in an armed zone (with the 5 s pre/post roll configured on
+  the track). Turning motion detection on does **not** by itself make recording
+  motion-triggered — that is a change to the track's schedule, and the viewer does not make
+  it for you.
 - **Unsupported on this firmware:** `/ISAPI/Event/triggers` and the record-plan
   endpoints answer `403 Invalid Operation`, and the device's event stream carries
   interface noise rather than motion events.
