@@ -842,6 +842,34 @@ class WindowEligibilityTests(unittest.TestCase):
         out = coverage.window_eligibility([self._file(200, 300)], 50, 350)
         self.assertEqual(out["target_epoch"], 200)
 
+    def test_clip_to_window_inverted_window_is_empty(self):
+        # from > to is invalid input; it must not fabricate coverage.
+        files = [self._file(0, 100), self._file(100, 200)]
+        self.assertEqual(coverage.clip_to_window(files, 450, 50), [])
+
+    def test_window_eligibility_inverted_window_has_no_eligibility(self):
+        out = coverage.window_eligibility([self._file(0, 100)], 450, 50)
+        self.assertEqual(out["segments"], [])
+        self.assertFalse(out["has_eligible"])
+        self.assertEqual(out["gaps"], [])
+        self.assertEqual(out["covered_s"], 0)
+
+    def test_window_eligibility_zero_width_window(self):
+        out = coverage.window_eligibility([self._file(0, 100)], 50, 50)
+        self.assertEqual(out["segments"], [])
+        self.assertFalse(out["has_eligible"])
+        self.assertEqual(out["covered_s"], 0)
+
+    def test_nearest_epoch_tie_prefers_the_earlier_segment(self):
+        # 15 is equidistant from 10 and 20; the earlier segment wins the tie.
+        segments = [(0, 10), (20, 30)]
+        self.assertEqual(coverage.nearest_epoch(segments, 15, 0, 30), 10)
+
+    def test_merge_spans_collapses_nested_and_touching(self):
+        spans = [(0, 100), (20, 30), (40, 50), (100, 120), (130, 140)]
+        self.assertEqual(coverage._merge_spans(spans), [(0, 120), (130, 140)])
+        self.assertEqual(coverage._merge_spans([]), [])
+
 
 class NeighboursApiTests(unittest.TestCase):
     """route_neighbours exposes the restart bar's window without dropping fields."""
@@ -904,6 +932,28 @@ class NeighboursApiTests(unittest.TestCase):
         payload = json.loads(handler.wfile.getvalue())
         self.assertEqual(payload["state"], "service_down")
         self.assertNotIn("window", payload)
+
+    def test_truncated_search_omits_window_but_keeps_neighbours(self):
+        day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
+        clip = self._clip(
+            util.to_cam_time(day.replace(hour=1).astimezone(timezone.utc)),
+            util.to_cam_time(day.replace(hour=1, minute=10).astimezone(timezone.utc)),
+        )
+        cam = mock.Mock()
+        cam.search.return_value = [clip] * 200  # hits route_coverage's 200 cap
+        app = viewer_app.ViewerApp()
+        app.cam = cam
+        handler = _FakeBodyHandler({})
+        from_cam = util.to_cam_time(day.replace(hour=8, minute=10).astimezone(timezone.utc))
+        to_cam = util.to_cam_time(day.replace(hour=8, minute=20).astimezone(timezone.utc))
+
+        app.route_neighbours(handler, {"from": [from_cam], "to": [to_cam]})
+        payload = json.loads(handler.wfile.getvalue())
+        # Truncated day = unknown coverage: never a fabricated "all gap" window.
+        self.assertTrue(payload["truncated"])
+        self.assertNotIn("window", payload)
+        for key in ("earlier", "later", "more_earlier", "more_later"):
+            self.assertIn(key, payload)
 
 
 if __name__ == "__main__":

@@ -120,7 +120,7 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 </div>
 <div class="restartbar-trackwrap">
 <input type="range" id="restart-scrubber" min="$from_epoch" max="$to_epoch" step="5" value="$from_epoch"
-       aria-label="Restart position within this clip" aria-describedby="restart-readout restart-caveat">
+       aria-describedby="restart-readout restart-caveat">
 <span class="rb-now" id="restart-now" hidden aria-hidden="true"></span>
 </div>
 <p class="legend restartbar-legend">
@@ -128,8 +128,8 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <span><span class="swatch none"></span>no recording</span>
 <span><span class="swatch unknown"></span>couldn&rsquo;t check</span>
 </p>
-<p class="restartbar-readout" id="restart-readout" aria-live="polite">Checking recorded coverage&hellip;</p>
-<p class="muted" id="restart-caveat">Restarts at the nearest keyframe before the chosen time (up to a few seconds earlier), with a short gap. You can go Back to your previous position.</p>
+<p class="restartbar-readout" id="restart-readout">Checking recorded coverage&hellip;</p>
+<p class="muted" id="restart-caveat">Restarting starts a fresh playback session (not a seek) at the nearest keyframe before the chosen time &mdash; up to a few seconds earlier, with a short gap. You can go Back to your previous position.</p>
 <div class="restartbar-actions">
 <button type="button" id="restart-go" class="searchbtn" disabled>Restart here</button>
 <button type="button" id="restart-cancel" class="copybtn" hidden>Cancel</button>

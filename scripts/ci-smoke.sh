@@ -47,7 +47,16 @@ if pgrep -x ffmpeg >/dev/null 2>&1; then
 fi
 
 echo "== neighbours API"
-curl -sf -m 10 "${BASE}/api/neighbours?from=20261012T194808Z&to=20261012T201036Z" | grep -q '"earlier"'
+neigh="$(curl -sf -m 10 "${BASE}/api/neighbours?from=20261012T194808Z&to=20261012T201036Z")"
+printf '%s\n' "${neigh}" | grep -q '"earlier"'
+printf '%s\n' "${neigh}" | grep -q '"window"'
+echo "== neighbours API omits window on a non-ok state"
+bad="$(curl -s -m 10 "${BASE}/api/neighbours?from=nope&to=nope")"
+printf '%s\n' "${bad}" | grep -q 'bad_request'
+if printf '%s\n' "${bad}" | grep -q '"window"'; then
+    echo "FAIL: window returned for a non-ok state" >&2
+    exit 1
+fi
 
 echo "== coverage API and picker markup"
 curl -sf -m 10 "${BASE}/api/coverage?date=$(date +%F)" | grep -q '"state"'

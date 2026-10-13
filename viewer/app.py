@@ -574,6 +574,7 @@ class ViewerApp:
             "later": [],
             "more_earlier": False,
             "more_later": False,
+            "truncated": False,
         }
         try:
             clips = self.cam.search(
@@ -594,12 +595,19 @@ class ViewerApp:
             payload.update(
                 coverage.neighbours(built["files"], int(start.timestamp()), int(end.timestamp()))
             )
-            # The restart bar's eligible sub-intervals for this exact clip window,
-            # clipped from the same day search this handler already ran so the
-            # play page never triggers a second camera search.
-            payload["window"] = coverage.window_eligibility(
-                built["files"], int(start.timestamp()), int(end.timestamp())
-            )
+            if len(clips) >= 200:
+                # Mirror route_coverage: a truncated search may be missing clips,
+                # so its window is not trustworthy as "covered vs gap" and must
+                # never paint a real-looking "no recording". Omit the window; the
+                # bar then falls back to its "coverage couldn't be checked" state.
+                payload["truncated"] = True
+            else:
+                # The restart bar's eligible sub-intervals for this exact clip
+                # window, clipped from the same day search this handler already
+                # ran so the play page never triggers a second camera search.
+                payload["window"] = coverage.window_eligibility(
+                    built["files"], int(start.timestamp()), int(end.timestamp())
+                )
         self.send_json(handler, payload)
 
     # ── motion detection ────────────────────────────────────────────

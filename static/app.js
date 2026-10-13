@@ -517,6 +517,19 @@
   function initRestartBar(video) {
     var bar = document.getElementById("restart-bar");
     if (!bar || !video) return;
+
+    // Idempotent: a tab resume re-runs initPlayback -> initRestartBar. Tear down
+    // the previous instance's ticker and listeners first, so a 1 Hz ticker and a
+    // set of listeners cannot accumulate on every app switch.
+    if (bar._restartBar) bar._restartBar.destroy();
+    var alive = true;
+    var listeners = [];
+    var THUMB_PX = 18; // matches the #restart-scrubber thumb width in style.css
+    function on(target, type, fn, opts) {
+      target.addEventListener(type, fn, opts);
+      listeners.push([target, type, fn, opts]);
+    }
+
     var scrubber = document.getElementById("restart-scrubber");
     var nowMark = document.getElementById("restart-now");
     var readout = document.getElementById("restart-readout");
@@ -541,7 +554,7 @@
       known: false,    // that response reported usable coverage (state "ok")
       segments: [],    // [{start_epoch, end_epoch, start_pct, end_pct}]
       pending: null,   // previewed restart target (epoch seconds)
-      snapNote: "",
+      snapped: false,  // the pending target was snapped out of a gap
       playing: false,
       t0: null,        // when playback first started on this page
       ticker: null,
@@ -607,6 +620,7 @@
     function renderSelection() {
       var canCommit;
       var text;
+      var warn = false;
       if (!ui.loaded) {
         canCommit = false;
         text = "Checking recorded coverage\u2026";
@@ -615,14 +629,19 @@
         text = "No recording in this window.";
       } else if (!ui.known) {
         canCommit = true;
+        warn = true;
         text = "Coverage couldn\u2019t be checked. You can still restart, but the " +
           "camera may have nothing at that time.";
       } else {
         var target = ui.pending === null ? fromEpoch : ui.pending;
         if (coveredAt(target)) {
           canCommit = true;
-          text = (ui.snapNote ? ui.snapNote + " " : "") +
-            "Restart here at \u2248 " + clock(target) + " \u00b7 recording.";
+          // The chosen target is exact, so no "approximately" here; the only
+          // uncertainty is the keyframe landing, which the caveat covers. A
+          // snap names the time once, not twice.
+          text = (ui.snapped
+            ? "Snapped to the nearest recording: "
+            : "Restart here at ") + clock(target) + " \u00b7 recording.";
         } else {
           // Defensive: snapping should keep the target covered when one exists.
           canCommit = false;
@@ -630,6 +649,9 @@
         }
       }
       readout.textContent = text;
+      // Coverage that could not be checked is a warning state, not ordinary
+      // status text; restart stays enabled.
+      readout.classList.toggle("warn", warn);
       go.disabled = !canCommit;
       if (cancel) cancel.hidden = !(canCommit && ui.pending !== null && ui.pending !== fromEpoch);
       updateAria();
@@ -640,10 +662,10 @@
       var snapped = ui.known ? nearestEligible(raw) : null;
       if (snapped !== null && snapped !== raw) {
         ui.pending = snapped;
-        ui.snapNote = "Snapped to the nearest recording: " + clock(snapped) + ".";
+        ui.snapped = true;
       } else {
         ui.pending = raw;
-        ui.snapNote = "";
+        ui.snapped = false;
       }
       scrubber.value = String(ui.pending);
       renderSelection();
@@ -651,7 +673,7 @@
 
     function cancelPreview() {
       ui.pending = null;
-      ui.snapNote = "";
+      ui.snapped = false;
       scrubber.value = String(fromEpoch);
       renderSelection();
       try { scrubber.focus({ preventScroll: true }); } catch (e) { /* older browsers */ }
@@ -685,8 +707,15 @@
         return;
       }
       var span = toEpoch - fromEpoch;
-      var pct = span > 0 ? ((pos - fromEpoch) / span) * 100 : 0;
-      if (nowMark) { nowMark.hidden = false; nowMark.style.left = pct + "%"; }
+      var frac = span > 0 ? (pos - fromEpoch) / span : 0;
+      if (nowMark) {
+        nowMark.hidden = false;
+        // A native range thumb's centre travels [THUMB/2, width - THUMB/2], not
+        // the whole track, so inset the marker to sit under the thumb instead of
+        // drifting ~9 px (2-3% on a phone bar) toward the clip ends.
+        nowMark.style.left = "calc((100% - " + THUMB_PX + "px) * " + frac +
+          " + " + (THUMB_PX / 2) + "px)";
+      }
       if (counter) {
         counter.textContent = "Position \u2248 " + clock(Math.round(pos)) +
           " \u00b7 playing in real time \u00b7 \u2248 " +
@@ -709,12 +738,15 @@
       renderPosition();
     }
 
-    scrubber.addEventListener("input", function () { setPending(Number(scrubber.value)); });
-    scrubber.addEventListener("keydown", function (e) {
+    on(scrubber, "input", function () { setPending(Number(scrubber.value)); });
+    on(scrubber, "keydown", function (e) {
       if (e.key === "PageUp" || e.key === "PageDown") {
         e.preventDefault();
         setPending(Number(scrubber.value) + (e.key === "PageUp" ? 60 : -60));
-      } else if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      } else if (e.key === "Enter") {
+        // Enter commits. Space is deliberately not a commit key on the range:
+        // pressing it at the window start would restart the session for no
+        // positional gain. The Restart button still activates with Space natively.
         e.preventDefault();
         commit();
       } else if (e.key === "Escape") {
@@ -722,21 +754,22 @@
         cancelPreview();
       }
     });
-    go.addEventListener("click", commit);
-    if (cancel) cancel.addEventListener("click", cancelPreview);
+    on(go, "click", commit);
+    if (cancel) on(cancel, "click", cancelPreview);
 
-    video.addEventListener("playing", function () {
+    on(video, "playing", function () {
       if (!ui.t0) ui.t0 = Date.now();
       ui.playing = true;
       startTicker();
       renderPosition();
     });
-    video.addEventListener("pause", markNotPlaying);
-    video.addEventListener("waiting", markNotPlaying);
-    video.addEventListener("stalled", markNotPlaying);
-    video.addEventListener("ended", markNotPlaying);
+    on(video, "pause", markNotPlaying);
+    on(video, "waiting", markNotPlaying);
+    on(video, "stalled", markNotPlaying);
+    on(video, "ended", markNotPlaying);
 
     subscribeNeighbours(function (data) {
+      if (!alive) return; // this instance was torn down by a resume re-init
       ui.loaded = true;
       if (data && data.state === "ok" && data.window) {
         ui.known = true;
@@ -756,6 +789,18 @@
       renderSelection();
       renderPosition();
     });
+
+    bar._restartBar = {
+      destroy: function () {
+        alive = false;
+        stopTicker();
+        for (var i = 0; i < listeners.length; i++) {
+          var l = listeners[i];
+          l[0].removeEventListener(l[1], l[2], l[3]);
+        }
+        listeners = [];
+      },
+    };
 
     renderSelection();
     renderPosition();

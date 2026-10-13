@@ -351,8 +351,10 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
   -webkit-appearance: none; appearance: none;
   width: 100%; height: 44px; background: transparent; display: block;
   --track: var(--inset);
-  touch-action: pan-y; /* horizontal scrub, vertical page scroll */
 }
+/* Only the restart bar opts into horizontal-scrub / vertical-scroll; the
+   picker's own scrubber keeps its shipped touch behaviour. */
+#restart-scrubber { touch-action: pan-y; }
 #scrubber::-webkit-slider-runnable-track,
 #restart-scrubber::-webkit-slider-runnable-track {
   height: 22px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--track);
@@ -424,6 +426,8 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 .restartbar-label { font-weight: 600; }
 .restartbar-trackwrap { position: relative; margin-top: 2px; }
 .restartbar-readout { margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+/* Couldn't-check coverage is a warning, not ordinary status text. */
+.restartbar-readout.warn { color: var(--warn); }
 .restartbar-legend { margin: 6px 0 2px; }
 .restartbar-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 2px; }
 
