@@ -38,7 +38,10 @@ class BadResponseError(CameraError):
 class Clip:
     """One recorded clip as reported by the search service."""
 
-    uri: str  # normalized rtsp playbackURI (by-name when the camera provides name/size)
+    uri: str  # normalized rtsp playbackURI (unescaped, for display/VLC)
+    uri_escaped: (
+        str  # XML-escaped playbackURI exactly as the camera returned it (for ISAPI download)
+    )
     start_utc: str  # 20261012T194808Z
     end_utc: str
     name: str
@@ -149,6 +152,29 @@ class Camera:
             raise ServiceDownError(f"snapshot ch{channel} -> HTTP {r.status_code}")
         return r.content
 
+    def download_stream(self, escaped_uri: str):
+        """Stream a recorded file over HTTP via /ISAPI/ContentMgmt/download.
+
+        Returns the raw requests response (stream=True); caller iterates it.
+        NOTE: escaped_uri must keep XML escaping (&amp;) — raw '&' breaks the XML body.
+        """
+        body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<downloadRequest version="1.0" xmlns="http://www.isapi.org/ver20/XMLSchema">'
+            f"<playbackURI>{escaped_uri}</playbackURI>"
+            "</downloadRequest>"
+        )
+        try:
+            return self.session.get(
+                self.base + "/ISAPI/ContentMgmt/download",
+                data=body.encode(),
+                headers={"Content-Type": "application/xml"},
+                timeout=(self.timeout, 30),
+                stream=True,
+            )
+        except Exception as exc:
+            raise _classify_requests_error(exc) from exc
+
     def rtsp_live_url(self, channel: str) -> str:
         return f"{self.rtsp_base}/Streaming/channels/{channel}"
 
@@ -197,6 +223,11 @@ class MockCamera(Camera):
         return [
             Clip(
                 uri=uri,
+                uri_escaped=(
+                    f"rtsp://{config.CAM_HOST}:554/Streaming/tracks/101/"
+                    "?starttime=20261012T194808Z&amp;endtime=20261012T201036Z"
+                    "&amp;name=ch01_00000000000000000&amp;size=264532808"
+                ),
                 start_utc=fields["starttime"],
                 end_utc=fields["endtime"],
                 name=fields["name"],
@@ -247,6 +278,7 @@ def parse_search_response(xml_text: str, rtsp_base: str) -> list[Clip]:
         if not (uri_raw and start and end):
             continue
         uri = util.normalize_playback_uri(uri_raw.group(1), rtsp_base)
+        uri_escaped = util.normalize_playback_uri(uri_raw.group(1), rtsp_base, unescape=False)
         fields = util.clip_fields(uri)
         start_utc = fields.get("starttime") or _iso_to_cam(start.group(1))
         end_utc = fields.get("endtime") or _iso_to_cam(end.group(1))
@@ -257,6 +289,7 @@ def parse_search_response(xml_text: str, rtsp_base: str) -> list[Clip]:
         clips.append(
             Clip(
                 uri=uri,
+                uri_escaped=uri_escaped,
                 start_utc=start_utc,
                 end_utc=end_utc,
                 name=fields.get("name", ""),

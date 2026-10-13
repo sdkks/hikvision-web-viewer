@@ -27,8 +27,6 @@ def _ffmpeg_base() -> list[str]:
 
 def _fmp4_out() -> list[str]:
     return [
-        "-c",
-        "copy",
         "-movflags",
         "frag_keyframe+empty_moov+default_base_moof",
         "-f",
@@ -37,7 +35,22 @@ def _fmp4_out() -> list[str]:
     ]
 
 
-def _mock_live_cmd(channel: str) -> list[str]:
+def _transcode_out() -> list[str]:
+    """HEVC -> H.264 on the fly, for browsers without HEVC decode. Video only (camera serves no audio)."""
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "25",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+    ] + _fmp4_out()
+
+
+def _mock_live_cmd(channel: str, transcode: bool = False) -> list[str]:
     size = "1280x720" if channel.endswith("1") else "640x360"
     return [
         "ffmpeg",
@@ -96,20 +109,22 @@ def _mock_playback_cmd(duration_s: int) -> list[str]:
     ]
 
 
-def live_cmd(channel: str) -> list[str]:
+def live_cmd(channel: str, transcode: bool = False) -> list[str]:
     """ffmpeg command for an endless live stream of the given ISAPI channel."""
     if config.MOCK:
-        return _mock_live_cmd(channel)
+        return _mock_live_cmd(channel, transcode)
     creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
     source = f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/channels/{channel}"
-    return _ffmpeg_base() + ["-i", source] + _fmp4_out()
+    out = _transcode_out() if transcode else ["-c", "copy"] + _fmp4_out()
+    return _ffmpeg_base() + ["-i", source] + out
 
 
-def playback_cmd(rtsp_url: str, duration_s: int) -> list[str]:
+def playback_cmd(rtsp_url: str, duration_s: int, transcode: bool = False) -> list[str]:
     """ffmpeg command for a live-tempo playback of an archived clip window."""
     if config.MOCK:
         return _mock_playback_cmd(duration_s)
-    return _ffmpeg_base() + ["-i", rtsp_url] + _fmp4_out()
+    out = _transcode_out() if transcode else ["-c", "copy"] + _fmp4_out()
+    return _ffmpeg_base() + ["-i", rtsp_url] + out
 
 
 def _kill_locked(proc: subprocess.Popen | None) -> None:
@@ -121,7 +136,7 @@ def _kill_locked(proc: subprocess.Popen | None) -> None:
             pass
 
 
-def start_live(channel: str) -> subprocess.Popen:
+def start_live(channel: str, transcode: bool = False) -> subprocess.Popen:
     """Start (or restart) the live ffmpeg session for one channel."""
     global _live_procs
     with _live_lock:
@@ -134,7 +149,7 @@ def start_live(channel: str) -> subprocess.Popen:
         return proc
 
 
-def start_playback(rtsp_url: str, duration_s: int) -> subprocess.Popen:
+def start_playback(rtsp_url: str, duration_s: int, transcode: bool = False) -> subprocess.Popen:
     """Start a playback session, enforcing the camera's single-playback limit."""
     global _playback_proc
     with _playback_lock:
@@ -215,6 +230,52 @@ def mock_snapshot_jpeg() -> bytes:
     if out.returncode != 0 or not out.stdout.startswith(b"\xff\xd8"):
         raise RuntimeError("mock snapshot generation failed")
     return out.stdout
+
+
+class MockDownloadResponse:
+    """Tiny stand-in for a requests streaming response (mock mode only)."""
+
+    status_code = 200
+    headers = {"Content-Type": "video/mp4"}
+
+    def iter_content(self, chunk_size):  # signature parity with requests
+        out = subprocess.run(
+            [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=15",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-t",
+                "5",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof",
+                "-f",
+                "mp4",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        data = out.stdout
+        for i in range(0, len(data), chunk_size):
+            yield data[i : i + chunk_size]
+
+    def close(self):
+        pass
+
+
+def mock_download_response():
+    return MockDownloadResponse()
 
 
 def build_playback_url(from_cam: str, to_cam: str) -> str:

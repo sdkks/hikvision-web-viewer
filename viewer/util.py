@@ -69,12 +69,14 @@ def human_size(num_bytes: int) -> str:
     return f"{value:.1f} GB"
 
 
-def normalize_playback_uri(uri: str, rtsp_base: str) -> str:
-    """Camera playbackURI: unescape XML entities, rewrite host:port, keep query."""
+def normalize_playback_uri(uri: str, rtsp_base: str, unescape: bool = True) -> str:
+    """Camera playbackURI: rewrite host:port, keep query. XML entities kept on request
+    (the ISAPI download body needs the &amp;-escaped form verbatim)."""
     import html as html_mod
     from urllib.parse import urlparse
 
-    uri = html_mod.unescape(uri or "").strip()
+    uri = (html_mod.unescape(uri) if unescape else uri) or ""
+    uri = uri.strip()
     if not uri:
         return ""
     host_port = urlparse(rtsp_base).netloc

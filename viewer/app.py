@@ -178,7 +178,10 @@ class ViewerApp:
                 f"<li class='clip'><div class='times'>{esc(start_local)} &rarr; "
                 f"{esc(end_local)}</div>"
                 f"<div class='meta'>{meta}</div>"
+                f"<div class='clipactions'>"
                 f"<a class='playbtn' href='{play_href}'>&#9654; Play</a>"
+                f"<a class='dlbtn' href='/download?from={esc(from_cam)}&amp;to={esc(to_cam)}"
+                f"&amp;name={esc(clip.name)}&amp;size={clip.size}'>&#8681; Download</a></div>"
                 f"<details><summary>rtsp URI &middot; ffmpeg</summary>"
                 f"<pre id='u{clip.start_utc}'>{esc(clip.uri)}</pre>"
                 f"<button type='button' class='copybtn' data-target='#u{clip.start_utc}'>Copy URI</button>"
@@ -256,8 +259,16 @@ class ViewerApp:
         if channel not in CHANNELS:
             handler.send_error(404)
             return
+        import sys as _sys
+
+        print(
+            f"[route_stream] ch={channel} query={query} path={handler.path}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        transcode = query.get("transcode", ["0"])[0] == "1"
         try:
-            proc = streams.start_live(channel)
+            proc = streams.start_live(channel, transcode=transcode)
         except FileNotFoundError:
             handler.send_error(503, "ffmpeg not found on the server")
             return
@@ -278,8 +289,9 @@ class ViewerApp:
             handler.send_error(400, "bad clip window")
             return
         url = streams.build_playback_url(from_cam, to_cam)
+        transcode = query.get("transcode", ["0"])[0] == "1"
         try:
-            proc = streams.start_playback(url, duration)
+            proc = streams.start_playback(url, duration, transcode=transcode)
         except FileNotFoundError:
             handler.send_error(503, "ffmpeg not found on the server")
             return
@@ -302,6 +314,60 @@ class ViewerApp:
         handler.send_header("Cache-Control", "no-cache")
         handler.end_headers()
         handler.wfile.write(data)
+
+    def route_download(self, handler, query: dict):
+        """Proxy /ISAPI/ContentMgmt/download: network-speed clip download (no live tempo)."""
+        from_cam = (query.get("from", [""])[0] or "").strip()
+        to_cam = (query.get("to", [""])[0] or "").strip()
+        name = (query.get("name", [""])[0] or "").strip()
+        size = (query.get("size", [""])[0] or "").strip()
+        if not (util._CAM_RE.match(from_cam) and util._CAM_RE.match(to_cam)):
+            handler.send_error(400, "bad clip window")
+            return
+        uri_escaped = (
+            f"rtsp://{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101/"
+            f"?starttime={from_cam}&amp;endtime={to_cam}"
+        )
+        if name:
+            import html as html_mod
+
+            uri_escaped += f"&amp;name={html_mod.escape(name, quote=False)}"
+        if size.isdigit():
+            uri_escaped += f"&amp;size={size}"
+        try:
+            if config.MOCK:
+                r = streams.mock_download_response()
+            else:
+                r = self.cam.download_stream(uri_escaped)
+        except camera.CameraError as exc:
+            handler.send_error(502, f"download failed: {exc}")
+            return
+        if getattr(r, "status_code", 502) != 200:
+            handler.send_error(
+                502, f"camera refused the download (HTTP {getattr(r, 'status_code', '?')})"
+            )
+            try:
+                r.close()
+            except Exception:
+                pass
+            return
+        filename = f"clip_{from_cam}.mp4"
+        handler.send_response(200)
+        handler.send_header("Content-Type", "video/mp4")
+        handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        try:
+            for chunk in r.iter_content(131072):
+                handler.wfile.write(chunk)
+                handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # user cancelled the download
+        finally:
+            try:
+                r.close()
+            except Exception:
+                pass
 
     def route_snapshot(self, handler, query: dict):
         channel = query.get("ch", ["101"])[0] or "101"
@@ -366,6 +432,8 @@ class ViewerApp:
             return self.route_stream(handler, path.rsplit("/", 1)[-1], query)
         if path == "/playback-stream":
             return self.route_playback_stream(handler, query)
+        if path == "/download":
+            return self.route_download(handler, query)
         if path == "/snapshot":
             return self.route_snapshot(handler, query)
         if path.startswith("/isapi/"):

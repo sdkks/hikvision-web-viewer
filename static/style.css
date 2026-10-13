@@ -171,10 +171,19 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 .clip .times { font-weight: 600; }
 .clip .meta { color: var(--text-dim); font-size: 14px; margin: 2px 0 10px; }
 
+.clipactions { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 2px; }
+
 .playbtn {
   display: inline-flex; align-items: center; justify-content: center;
   min-height: 44px; padding: 8px 26px; border-radius: var(--pill);
   background: var(--accent); color: var(--bg); font: inherit; font-weight: 600;
+}
+
+.dlbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 8px 22px; border-radius: var(--pill);
+  background: transparent; color: var(--accent); font: inherit; font-weight: 600;
+  border: 1px solid var(--accent);
 }
 
 .clip details { margin-top: 10px; }
