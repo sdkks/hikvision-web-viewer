@@ -732,7 +732,7 @@
       var pos = positionEpoch();
       if (pos === null) {
         if (nowMark) nowMark.hidden = true;
-        if (counter) counter.textContent = "Position unknown \u2014 playback runs in real time.";
+        if (counter) counter.textContent = "Position unknown.";
         return;
       }
       var span = toEpoch - windowFrom;
@@ -747,7 +747,7 @@
       }
       if (counter) {
         counter.textContent = "Position \u2248 " + clock(Math.round(pos)) +
-          " \u00b7 playing in real time \u00b7 \u2248 " +
+          " \u00b7 \u2248 " +
           humanDuration(Math.max(0, Math.round(toEpoch - pos))) + " left";
       }
     }
@@ -967,7 +967,7 @@
         const messages = {
           service_down: "The camera's search service isn't responding (known to be flaky). Live view and clip playback still work.",
           unreachable: "Camera unreachable.",
-          bad_response: "Unexpected search reply (possible firmware drift). Live view still works.",
+          bad_response: "Unexpected search reply. Live view still works.",
         };
         const detail = payload.state_detail
           ? ` (${String(payload.state_detail).slice(0, 120)})`
@@ -1526,7 +1526,7 @@
       if (dirtyBar) dirtyBar.hidden = !dirty;
       if (dirtyText) {
         dirtyText.textContent = dirty
-          ? "Unsaved changes \u2014 the camera still has " + summaryText(state.camera.cells) +
+          ? "Changes not applied. The camera still has " + summaryText(state.camera.cells) +
             ", sensitivity " + state.camera.sensitivity +
             ", motion detection " + (state.camera.enabled ? "on" : "off") + "."
           : "";
@@ -1806,17 +1806,18 @@
         if (body.match) {
           showEndnote(false, "<p>" + escapeHtml(savedText(actual)) + "</p>",
             actual.enable_highlight);
-          setStatus("ok", "Saved \u2014 reported from the camera's readback.");
+          setStatus("ok", "Saved to camera.");
         } else {
+          // The camera accepted the write but stored different values: name the
+          // exact facts it kept instead of narrating the verification procedure.
           var items = (body.differences || []).map(function (d) {
-            return "<li>" + escapeHtml(d) + "</li>";
-          }).join("");
-          // The list must be a sibling of the paragraphs, not nested inside one.
+            return escapeHtml(d);
+          }).join(" ");
           showEndnote(true,
-            "<p>Saved with drift. The camera adjusted the values:</p><ul>" + items + "</ul>" +
+            "<p>" + items + "</p>" +
             "<p>" + escapeHtml(savedText(actual)) + "</p>",
             actual.enable_highlight);
-          setStatus("warn", "Saved with drift \u2014 the camera changed the values.");
+          setStatus("warn", "Saved, but the camera adjusted some values.");
         }
         return;
       }
@@ -1835,17 +1836,17 @@
             ", motion detection " + (body.actual.enabled ? "on" : "off") + "."
           : " The camera could not be read back, so its current state is unknown.";
         showError(
-          "The viewer could not confirm the write \u2014 it may or may not have been saved." +
-          seen + " Re-read the camera before retrying." +
+          "Couldn't confirm the change \u2014 it may or may not have been saved." +
+          seen + " Check the camera's settings before retrying." +
           (body.state_detail ? " (" + escapeHtml(body.state_detail) + ")" : ""),
           true);
-        setStatus("warn", "The write may not have landed \u2014 re-read the camera.");
+        setStatus("warn", "Couldn't confirm the change \u2014 check the camera.");
         return;
       }
       var messages = {
         unreachable: "The camera is unreachable. Nothing was saved.",
         service_down: "The camera did not answer. Nothing was saved.",
-        bad_response: "The camera gave an unexpected reply (possible firmware drift).",
+        bad_response: "The camera's reply wasn't what the viewer expected.",
         bad_request: "The viewer rejected the request."
       };
       showError((messages[body.state] || "Could not save.") +

@@ -14,7 +14,7 @@ BASE = Template("""<!doctype html>
 <header class="top"><span class="brand">$brand</span>
 <nav class="tabs" aria-label="Sections">
 <a href="/" aria-current="$nav_live">Live</a>
-<a href="/recordings" aria-current="$nav_rec">Recording Files</a>
+<a href="/recordings" aria-current="$nav_rec">Recordings</a>
 <a href="/motion" aria-current="$nav_motion">Motion</a>
 </nav></header>
 <main>
@@ -46,7 +46,7 @@ LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
 <button id="retry" type="button" class="retry" hidden>Retry now</button>
 """
 
-RECORDINGS = """<h1>Recording Files</h1>
+RECORDINGS = """<h1>Recordings</h1>
 <div class="presets" aria-label="Quick ranges">
 <a href="/recordings?preset=today">Today</a>
 <a href="/recordings?preset=24h">Last 24 h</a>
@@ -109,10 +109,8 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
        data-url="/hls/play/index.m3u8?from=$from_cam&amp;to=$to_cam" data-expected="$dur_s"></video>
 <button type="button" id="tap-start" class="tapstart" data-label="recording" hidden>Click or tap to play</button>
 </div>
-<p class="honest">Plays in real time &mdash; a $dur_h clip takes $dur_h. No seeking.</p>
-<p class="fallback"><a href="/snapshot?ch=101">Still image (main)</a><a href="/snapshot?ch=102">Still image (sub)</a></p>
 <p id="status-line" class="status" role="status"><span class="dot spin"></span><span class="label">Connecting to clip&hellip; starts at its beginning.</span></p>
-<p id="counter" class="counter muted">Position unknown &mdash; playback runs in real time.</p>
+<p id="counter" class="counter muted">Position unknown.</p>
 <div class="restartbar" id="restart-bar" data-from-epoch="$from_epoch" data-window-from-epoch="$window_from_epoch" data-to-epoch="$to_epoch" data-size="$size_raw">
 <div class="restartbar-head">
 <label class="restartbar-label" for="restart-scrubber">Restart from</label>
@@ -135,6 +133,8 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <button type="button" id="restart-cancel" class="copybtn" hidden>Cancel</button>
 </div>
 </div>
+<p class="honest">Plays in real time &mdash; a $dur_h clip takes $dur_h. No seeking.</p>
+<p class="fallback"><span class="muted">Camera&rsquo;s current frame &mdash; a live still, not this clip:</span><a href="/snapshot?ch=101">Live still (main)</a><a href="/snapshot?ch=102">Live still (sub)</a></p>
 <div id="endnote" class="endnote" hidden></div>
 <section id="jumps" hidden>
 <h2>Nearby recordings</h2>
@@ -149,7 +149,7 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 MOTION = Template("""<h1>Motion detection</h1>
 <p id="motion-status" class="status" role="status"><span class="dot spin"></span><span class="label">Reading the camera&hellip;</span></p>
 <section id="motion-dirty" class="dirtybar" hidden>
-<p id="motion-dirty-text">Unsaved changes.</p>
+<p id="motion-dirty-text">Changes not applied.</p>
 <div class="row">
 <button type="button" id="motion-apply-top" class="searchbtn">Apply to camera</button>
 <button type="button" id="motion-discard-top" class="copybtn">Discard changes</button>

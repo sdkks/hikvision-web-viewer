@@ -250,7 +250,7 @@ class ViewerApp:
             .replace("$to_val", esc(to_val))
             .replace("$results", results)
         )
-        self.render(handler, "Recording Files", content, nav="recordings", code=code)
+        self.render(handler, "Recordings", content, nav="recordings", code=code)
 
     def run_search(self, from_val: str, to_val: str):
         """Search and render results. Returns html str, or (html, http_code) on failure."""
@@ -284,8 +284,8 @@ class ViewerApp:
             return card, 503
         except camera.BadResponseError:
             card = (
-                "<div class='errcard'><p>The camera gave an unexpected search reply "
-                "(possible firmware drift). Live view still works.</p></div>"
+                "<div class='errcard'><p>The camera sent an unexpected search reply. "
+                "Live view still works.</p></div>"
             )
             return card, 502
 

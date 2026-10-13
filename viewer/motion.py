@@ -173,23 +173,15 @@ def diff(intended: dict, actual: dict) -> list[str]:
     """
     out: list[str] = []
     if bool(intended.get("enabled")) != bool(actual.get("enabled")):
-        out.append(
-            f"motion detection: asked {'on' if intended.get('enabled') else 'off'}, "
-            f"camera stored {'on' if actual.get('enabled') else 'off'}"
-        )
+        out.append(f"The camera kept motion detection {'on' if actual.get('enabled') else 'off'}.")
     if bool(intended.get("enable_highlight")) != bool(actual.get("enable_highlight")):
         out.append(
-            "live highlight: asked "
-            f"{'on' if intended.get('enable_highlight') else 'off'}, "
-            f"camera stored {'on' if actual.get('enable_highlight') else 'off'}"
+            "The camera kept the live highlight "
+            f"{'on' if actual.get('enable_highlight') else 'off'}."
         )
     if intended.get("sensitivity") != actual.get("sensitivity"):
-        out.append(
-            f"sensitivity: asked {intended.get('sensitivity')}, "
-            f"camera stored {actual.get('sensitivity')}"
-        )
+        out.append(f"The camera kept sensitivity at {actual.get('sensitivity')}.")
     if intended.get("cells") != actual.get("cells"):
-        ic = counts(intended.get("cells") or empty_grid())
         ac = counts(actual.get("cells") or empty_grid())
-        out.append(f"zones: asked {ic['armed']} armed, camera stored {ac['armed']} armed")
+        out.append(f"The camera stored {ac['armed']} of {ac['total']} cells armed.")
     return out

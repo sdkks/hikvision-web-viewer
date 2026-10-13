@@ -399,8 +399,7 @@ class MotionGridTests(unittest.TestCase):
         actual = copy.deepcopy(base)
         actual["sensitivity"] = 40
         differences = motion.diff(base, actual)
-        self.assertEqual(len(differences), 1)
-        self.assertIn("sensitivity", differences[0])
+        self.assertEqual(differences, ["The camera kept sensitivity at 40."])
 
 
 class MotionCameraTests(unittest.TestCase):
