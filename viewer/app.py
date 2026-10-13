@@ -255,6 +255,24 @@ class ViewerApp:
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass  # client went away or startup timeout; pump() already killed ffmpeg
 
+    def route_static(self, handler, name: str):
+        if not name:
+            handler.send_error(404)
+            return
+        file_path = (STATIC_DIR / name).resolve()
+        if not str(file_path).startswith(str(STATIC_DIR)) or not file_path.is_file():
+            handler.send_error(404)
+            return
+        data = file_path.read_bytes()
+        handler.send_response(200)
+        handler.send_header(
+            "Content-Type", STATIC_TYPES.get(file_path.suffix, "application/octet-stream")
+        )
+        handler.send_header("Content-Length", str(len(data)))
+        handler.send_header("Cache-Control", "no-cache")
+        handler.end_headers()
+        handler.wfile.write(data)
+
     def route_hls_playlist(self, handler, kind: str, query: dict):
         """Ensure the session exists and serve its playlist with absolute segment URLs."""
         if kind == "live":
@@ -422,15 +440,16 @@ def make_handler(app: ViewerApp):
 def run() -> None:
     import atexit
     import signal
+    import sys
 
     app = ViewerApp()
 
     def _shutdown(*_args) -> None:
         streams.kill_all()
+        sys.exit(0)
 
     atexit.register(_shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
 
     server = ThreadingHTTPServer((config.BIND_HOST, config.BIND_PORT), make_handler(app))
     server.daemon_threads = True
