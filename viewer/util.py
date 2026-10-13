@@ -79,8 +79,8 @@ def normalize_playback_uri(uri: str, rtsp_base: str, unescape: bool = True) -> s
     uri = uri.strip()
     if not uri:
         return ""
-    host_port = urlparse(rtsp_base).netloc
-    return re.sub(r"^rtsp://[^/?]+", f"rtsp://{host_port}", uri)
+    base = urlparse(rtsp_base)
+    return re.sub(r"^rtsps?://[^/?]+", f"{base.scheme}://{base.netloc}", uri)
 
 
 def clip_fields(uri: str) -> dict:

@@ -2,6 +2,8 @@
 
 import os
 
+from . import config_file
+
 
 def _int(name: str, default: int) -> int:
     try:
@@ -10,11 +12,32 @@ def _int(name: str, default: int) -> int:
         return default
 
 
-CAM_HOST = os.environ.get("HIK_HOST", "192.168.0.156")
-CAM_USER = os.environ.get("HIK_USER", "admin")
-CAM_PASS = os.environ.get("HIK_PASSWORD", "")
-RTSP_PORT = _int("HIK_RTSP_PORT", 554)
-HTTP_PORT = _int("HIK_HTTP_PORT", 80)
+# Optional JSON camera file (see config_file): one camera per instance. When set,
+# the file wins for the fields it sets and HIK_* fills the rest.
+VIEWER_CONFIG = os.environ.get(config_file.VIEWER_CONFIG_ENV, "").strip()
+
+# A missing or invalid file is captured here and reported by app.run(), which
+# refuses to start rather than quietly serving defaults. The constants below
+# still fall back to HIK_*/defaults so importing this module never raises.
+CONFIG_ERROR: str | None = None
+_file_fields: config_file.CameraFields = {}
+if VIEWER_CONFIG:
+    try:
+        _file_fields = config_file.load(VIEWER_CONFIG)
+    except config_file.ConfigFileError as exc:
+        CONFIG_ERROR = str(exc)
+
+_settings, CONFIG_NOTES = config_file.resolve_camera(os.environ, _file_fields)
+
+CAM_HOST = _settings.host
+CAM_USER = _settings.user
+CAM_PASS = _settings.password
+HTTP_PORT = _settings.http_port
+RTSP_PORT = _settings.rtsp_port
+CAM_TLS = _settings.tls
+CAM_TLS_VERIFY = _settings.tls_verify
+ISAPI_SCHEME = "https" if CAM_TLS else "http"
+RTSP_SCHEME = "rtsps" if CAM_TLS else "rtsp"
 MOCK = os.environ.get("HIK_MOCK", "") == "1"
 DEFAULT_CHANNEL = os.environ.get("VIEWER_DEFAULT_CHANNEL", "101")
 # Optional HTTP Basic Auth for the viewer itself. When both are set, every
@@ -33,6 +56,9 @@ ALLOWED_HOSTS = tuple(
     for host in os.environ.get("VIEWER_ALLOWED_HOSTS", "").split(",")
     if host.strip()
 )
-CAM_BASE = f"http://{CAM_HOST}:{HTTP_PORT}"
-RTSP_BASE = f"rtsp://{CAM_HOST}:{RTSP_PORT}"
+CAM_BASE = config_file.isapi_base(_settings)
+RTSP_BASE = config_file.rtsp_base(_settings)
+# requests' certificate verification follows tls_verify; it only matters when
+# the camera is reached over https (tls: true).
+CAM_VERIFY = CAM_TLS_VERIFY
 ISAPI_TIMEOUT = 8.0

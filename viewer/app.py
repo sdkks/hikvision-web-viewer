@@ -80,7 +80,7 @@ DRAIN_DEADLINE_S = 0.35
 # camera failure is shown, and never collapse it into "did not answer".
 CREDENTIALS_REFUSED = (
     "The camera refused the viewer's credentials. Fix the camera credentials "
-    "(HIK_USER / HIK_PASSWORD today; a config file is coming)."
+    "(HIK_USER / HIK_PASSWORD, or the camera config file)."
 )
 CREDENTIALS_REFUSED_SHORT = "the camera refused the viewer's credentials"
 
@@ -1029,7 +1029,7 @@ class ViewerApp:
         safe_name = name if _DOWNLOAD_NAME_RE.match(name) else ""
 
         uri_escaped = (
-            f"rtsp://{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101/"
+            f"{config.RTSP_SCHEME}://{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101/"
             f"?starttime={from_cam}&amp;endtime={to_cam}"
         )
         if safe_name:
@@ -1283,6 +1283,15 @@ def run() -> None:
     import atexit
     import signal
     import sys
+
+    # A broken VIEWER_CONFIG stops startup with its own message, before anything
+    # binds a port or builds a camera. Importing config never raises, so this is
+    # the one place the error is turned into a non-zero exit.
+    if config.CONFIG_ERROR:
+        print(f"hikvision-web-viewer: {config.CONFIG_ERROR}", file=sys.stderr)
+        raise SystemExit(2)
+    for note in config.CONFIG_NOTES:
+        print(f"hikvision-web-viewer: {note}", file=sys.stderr)
 
     app = ViewerApp()
 

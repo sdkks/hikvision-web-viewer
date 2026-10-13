@@ -34,6 +34,18 @@ def _ffmpeg_base() -> list[str]:
     return ["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp"]
 
 
+def _tls_input_options() -> list[str]:
+    """ffmpeg TLS input options, added only when the camera is configured for TLS.
+
+    ``-tls_verify`` is ffmpeg's tls-protocol option (verified with
+    ``ffmpeg -h protocol=tls``); the TLS-off path adds nothing, so the default
+    command stays byte-identical to before.
+    """
+    if not config.CAM_TLS:
+        return []
+    return ["-tls_verify", "1" if config.CAM_TLS_VERIFY else "0"]
+
+
 def _hls_out(directory: Path, live: bool, transcode: bool) -> list[str]:
     """HLS output flags.
 
@@ -64,7 +76,10 @@ def _hls_out(directory: Path, live: bool, transcode: bool) -> list[str]:
 
 def _camera_rtsp(channel: str) -> str:
     creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
-    return f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/channels/{channel}"
+    return (
+        f"{config.RTSP_SCHEME}://{creds}{config.CAM_HOST}:{config.RTSP_PORT}"
+        f"/Streaming/channels/{channel}"
+    )
 
 
 def _live_cmd(channel: str, directory: Path, transcode: bool) -> list[str]:
@@ -106,6 +121,7 @@ def _live_cmd(channel: str, directory: Path, transcode: bool) -> list[str]:
         ]
     return (
         _ffmpeg_base()
+        + _tls_input_options()
         + [
             "-i",
             _camera_rtsp(channel),
@@ -156,9 +172,11 @@ def _play_cmd(from_cam: str, to_cam: str, directory: Path, transcode: bool) -> l
     q = quote(f"starttime={from_cam}&endtime={to_cam}", safe="=&")
     return (
         _ffmpeg_base()
+        + _tls_input_options()
         + [
             "-i",
-            f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101?{q}",
+            f"{config.RTSP_SCHEME}://{creds}{config.CAM_HOST}:{config.RTSP_PORT}"
+            f"/Streaming/tracks/101?{q}",
         ]
         + _hls_out(directory, live=False, transcode=transcode)
     )

@@ -20,3 +20,10 @@ services:
       # VIEWER_DEFAULT_CHANNEL: "102"
       # Offline demo without a camera:
       # HIK_MOCK: "1"
+      # Optional: describe the camera in a mounted JSON file instead of HIK_*
+      # variables (see config.env.example). The file wins for the fields it
+      # sets; HIK_* fills the rest.
+      # VIEWER_CONFIG: /config/camera.json
+    # Mount the camera file read-only when VIEWER_CONFIG is set above:
+    # volumes:
+    #   - ./camera.json:/config/camera.json:ro

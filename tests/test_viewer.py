@@ -3,12 +3,14 @@
 import io
 import json
 import subprocess
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest import mock
 
 from viewer import app as viewer_app
-from viewer import camera, config, coverage, motion, streams, util
+from viewer import camera, config, config_file, coverage, motion, streams, util
 
 
 class TimeTests(unittest.TestCase):
@@ -1305,6 +1307,21 @@ class DownloadRouteTests(unittest.TestCase):
         )
         self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
 
+    def test_download_body_uses_the_configured_rtsp_scheme(self):
+        # With TLS on, the ISAPI playback body must carry rtsps, not rtsp.
+        app = self._app()
+        captured = {}
+
+        def fake_download(uri):
+            captured["uri"] = uri
+            return self._FakeDownload([b"\x00\x00\x00\x18ftypmp42"])
+
+        app.cam.download_stream = fake_download
+        with mock.patch.object(config, "RTSP_SCHEME", "rtsps"):
+            app.route_download(_FakeBodyHandler({}), self.WINDOW)
+        self.assertTrue(captured["uri"].startswith("rtsps://"))
+        self.assertIn("/Streaming/tracks/101/", captured["uri"])
+
     def test_single_chunk_body_is_relayed_intact(self):
         # The first chunk is read early to sniff the container, so it must still
         # be written exactly once: not dropped and not duplicated.
@@ -1449,6 +1466,302 @@ class DownloadRouteTests(unittest.TestCase):
         body = handler.wfile.getvalue().decode()
         self.assertIn("no data", body)
         self.assertIn("/download?from=20261012T194808Z", body)
+
+
+class ConfigFileTests(unittest.TestCase):
+    """VIEWER_CONFIG: strict loading, HIK_* fallback, and TLS scheme selection."""
+
+    def _write(self, payload) -> str:
+        path = Path(tempfile.mkdtemp()) / "camera.json"
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        return str(path)
+
+    # ── loading and validation ───────────────────────────────────────
+    def test_loads_the_camera_fields_the_file_sets(self):
+        path = self._write(
+            {
+                "camera": {
+                    "host": "10.0.0.9",
+                    "http_port": 8080,
+                    "rtsp_port": 8554,
+                    "user": "viewer",
+                    "password": "secret",
+                    "tls": True,
+                    "tls_verify": False,
+                }
+            }
+        )
+        self.assertEqual(
+            config_file.load(path),
+            {
+                "host": "10.0.0.9",
+                "http_port": 8080,
+                "rtsp_port": 8554,
+                "user": "viewer",
+                "password": "secret",
+                "tls": True,
+                "tls_verify": False,
+            },
+        )
+
+    def test_missing_file_names_the_path(self):
+        path = "/nonexistent/definitely/camera.json"
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn(path, str(ctx.exception))
+        self.assertIn("cannot read", str(ctx.exception))
+
+    def test_malformed_json_names_the_path(self):
+        path = self._write("{not json")
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn(path, str(ctx.exception))
+        self.assertIn("not valid JSON", str(ctx.exception))
+
+    def test_a_non_object_top_level_is_refused(self):
+        path = self._write([{"host": "cam"}])
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn("must contain a JSON object", str(ctx.exception))
+
+    def test_unknown_camera_key_is_named(self):
+        path = self._write({"camera": {"usr": "admin"}})
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn('"usr"', str(ctx.exception))
+
+    def test_unknown_top_level_key_is_named(self):
+        path = self._write({"camera": {}, "cam": {}})
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn('"cam"', str(ctx.exception))
+
+    def test_a_two_entry_cameras_array_is_refused(self):
+        path = self._write({"cameras": [{"host": "a"}, {"host": "b"}]})
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn("one camera per instance", str(ctx.exception))
+
+    def test_a_one_entry_cameras_array_is_accepted(self):
+        path = self._write({"cameras": [{"host": "solo"}]})
+        self.assertEqual(config_file.load(path), {"host": "solo"})
+
+    def test_empty_host_is_refused(self):
+        path = self._write({"camera": {"host": "   "}})
+        with self.assertRaises(config_file.ConfigFileError):
+            config_file.load(path)
+
+    def test_a_string_port_is_refused(self):
+        path = self._write({"camera": {"http_port": "80"}})
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn("http_port", str(ctx.exception))
+
+    def test_a_port_out_of_range_is_refused(self):
+        path = self._write({"camera": {"rtsp_port": 70000}})
+        with self.assertRaises(config_file.ConfigFileError):
+            config_file.load(path)
+
+    def test_a_boolean_port_is_not_an_integer_port(self):
+        # bool is an int subclass in Python; JSON true must not become port 1.
+        path = self._write({"camera": {"http_port": True}})
+        with self.assertRaises(config_file.ConfigFileError):
+            config_file.load(path)
+
+    def test_a_non_boolean_tls_is_refused(self):
+        path = self._write({"camera": {"tls": "true"}})
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn("tls", str(ctx.exception))
+
+    # ── precedence (file over HIK_*) ─────────────────────────────────
+    def test_omitted_fields_fall_back_to_the_environment(self):
+        settings, notes = config_file.resolve_camera(
+            {"HIK_HOST": "envcam", "HIK_RTSP_PORT": "8554"},
+            {"user": "fileuser"},
+        )
+        self.assertEqual(settings.host, "envcam")
+        self.assertEqual(settings.rtsp_port, 8554)
+        self.assertEqual(settings.user, "fileuser")
+        self.assertEqual(notes, [])
+
+    def test_file_wins_over_a_disagreeing_environment_and_says_so(self):
+        settings, notes = config_file.resolve_camera(
+            {"HIK_HOST": "envcam"},
+            {"host": "filecam"},
+        )
+        self.assertEqual(settings.host, "filecam")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("camera.host", notes[0])
+        self.assertIn("HIK_HOST", notes[0])
+        self.assertIn("filecam", notes[0])
+
+    def test_agreeing_values_produce_no_note(self):
+        _, notes = config_file.resolve_camera(
+            {"HIK_HOST": "same"},
+            {"host": "same"},
+        )
+        self.assertEqual(notes, [])
+
+    def test_a_password_mismatch_never_prints_the_password(self):
+        settings, notes = config_file.resolve_camera(
+            {"HIK_PASSWORD": "env-secret"},
+            {"password": "file-secret"},
+        )
+        self.assertEqual(settings.password, "file-secret")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("HIK_PASSWORD", notes[0])
+        self.assertNotIn("file-secret", notes[0])
+        self.assertNotIn("env-secret", notes[0])
+
+    def test_defaults_are_untouched_when_no_file_is_used(self):
+        settings, notes = config_file.resolve_camera({}, {})
+        self.assertEqual(settings.host, config_file.DEFAULT_HOST)
+        self.assertEqual(settings.user, config_file.DEFAULT_USER)
+        self.assertEqual(settings.http_port, config_file.DEFAULT_HTTP_PORT)
+        self.assertEqual(settings.rtsp_port, config_file.DEFAULT_RTSP_PORT)
+        self.assertFalse(settings.tls)
+        self.assertFalse(settings.tls_verify)
+        self.assertEqual(notes, [])
+
+    # ── TLS scheme selection ─────────────────────────────────────────
+    def test_tls_builds_https_and_rtsps_urls(self):
+        settings, notes = config_file.resolve_camera(
+            {"HIK_HOST": "cam.lan"},
+            {"tls": True, "tls_verify": False, "http_port": 443, "rtsp_port": 322},
+        )
+        self.assertEqual(config_file.isapi_base(settings), "https://cam.lan:443")
+        self.assertEqual(config_file.rtsp_base(settings), "rtsps://cam.lan:322")
+        self.assertIn("verification is off", notes[0])
+
+    def test_non_tls_builds_todays_urls(self):
+        settings, _ = config_file.resolve_camera({}, {})
+        self.assertEqual(config_file.isapi_base(settings), "http://192.168.0.156:80")
+        self.assertEqual(config_file.rtsp_base(settings), "rtsp://192.168.0.156:554")
+
+    def test_tls_verify_toggles_verification(self):
+        on, _ = config_file.resolve_camera({}, {"tls": True, "tls_verify": True})
+        off, _ = config_file.resolve_camera({}, {"tls": True, "tls_verify": False})
+        default, _ = config_file.resolve_camera({}, {"tls": True})
+        self.assertTrue(on.tls_verify)
+        self.assertFalse(off.tls_verify)
+        self.assertFalse(default.tls_verify)  # documented default
+
+
+class StreamTlsTests(unittest.TestCase):
+    """The ffmpeg command grows TLS options only when the camera uses TLS."""
+
+    def test_tls_off_adds_nothing_and_keeps_todays_rtsp_url(self):
+        with mock.patch.multiple(
+            config,
+            CAM_TLS=False,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsp",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=554,
+        ):
+            self.assertEqual(streams._tls_input_options(), [])
+            self.assertEqual(
+                streams._camera_rtsp("101"),
+                "rtsp://u:p@cam:554/Streaming/channels/101",
+            )
+
+    def test_tls_on_uses_rtsps_and_the_verify_skip_flag(self):
+        with mock.patch.multiple(
+            config,
+            CAM_TLS=True,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsps",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=322,
+        ):
+            self.assertEqual(streams._tls_input_options(), ["-tls_verify", "0"])
+            self.assertEqual(
+                streams._camera_rtsp("101"),
+                "rtsps://u:p@cam:322/Streaming/channels/101",
+            )
+
+    def test_tls_on_with_verification_asks_ffmpeg_to_verify(self):
+        with mock.patch.multiple(config, CAM_TLS=True, CAM_TLS_VERIFY=True):
+            self.assertEqual(streams._tls_input_options(), ["-tls_verify", "1"])
+
+    def test_tls_off_keeps_todays_live_command(self):
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=False,
+            RTSP_SCHEME="rtsp",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=554,
+        ):
+            cmd = streams._live_cmd("101", Path("/tmp/x"), True)
+        self.assertNotIn("-tls_verify", cmd)
+        self.assertEqual(cmd[cmd.index("-i") + 1], "rtsp://u:p@cam:554/Streaming/channels/101")
+
+    def test_tls_off_keeps_todays_playback_command(self):
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=False,
+            RTSP_SCHEME="rtsp",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=554,
+        ):
+            cmd = streams._play_cmd("20261012T194808Z", "20261012T201036Z", Path("/tmp/x"), True)
+        self.assertNotIn("-tls_verify", cmd)
+        self.assertEqual(
+            cmd[cmd.index("-i") + 1],
+            "rtsp://u:p@cam:554/Streaming/tracks/101"
+            "?starttime=20261012T194808Z&endtime=20261012T201036Z",
+        )
+
+    def test_tls_on_uses_rtsps_in_the_playback_command(self):
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=True,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsps",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=322,
+        ):
+            cmd = streams._play_cmd("20261012T194808Z", "20261012T201036Z", Path("/tmp/x"), True)
+        self.assertIn("rtsps://u:p@cam:322/Streaming/tracks/101", cmd[cmd.index("-i") + 1])
+        self.assertLess(cmd.index("-tls_verify"), cmd.index("-i"))
+        self.assertEqual(cmd[cmd.index("-tls_verify") + 1], "0")
+
+
+class CameraVerifyTests(unittest.TestCase):
+    def test_verify_defaults_to_requests_default(self):
+        cam = camera.Camera("http://cam", "u", "p", "rtsp://cam", 5)
+        self.assertTrue(cam.session.verify)
+
+    def test_verify_false_is_carried_to_the_session(self):
+        cam = camera.Camera("https://cam", "u", "p", "rtsps://cam", 5, verify=False)
+        self.assertFalse(cam.session.verify)
+
+
+class PlaybackUriSchemeTests(unittest.TestCase):
+    def test_normalize_rewrites_to_the_configured_scheme(self):
+        uri = "rtsp://old:554/Streaming/tracks/101?starttime=x"
+        self.assertEqual(
+            util.normalize_playback_uri(uri, "rtsps://cam:322"),
+            "rtsps://cam:322/Streaming/tracks/101?starttime=x",
+        )
+        self.assertEqual(
+            util.normalize_playback_uri(uri, "rtsp://cam:554"),
+            "rtsp://cam:554/Streaming/tracks/101?starttime=x",
+        )
 
 
 if __name__ == "__main__":

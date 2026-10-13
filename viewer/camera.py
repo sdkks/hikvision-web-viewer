@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from xml.etree import ElementTree
 
 import requests
+import urllib3
 from requests.auth import HTTPDigestAuth
 
 from . import config, motion, util
@@ -94,13 +95,27 @@ def _classify_requests_error(exc: Exception) -> CameraError:
 class Camera:
     """Talks to the real device over ISAPI."""
 
-    def __init__(self, host_base: str, user: str, password: str, rtsp_base: str, timeout: float):
+    def __init__(
+        self,
+        host_base: str,
+        user: str,
+        password: str,
+        rtsp_base: str,
+        timeout: float,
+        verify: bool = True,
+    ):
         self.base = host_base
         self.rtsp_base = rtsp_base
         self.auth = HTTPDigestAuth(user, password)
         self.timeout = timeout
         self.session = requests.Session()
         self.session.auth = self.auth
+        # verify=False is the self-signed-camera case (tls_verify: false). The
+        # deliberate startup note in config.py already says verification is off,
+        # so silence urllib3's per-request warning instead of flooding the log.
+        self.session.verify = verify
+        if not verify:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     def _get(self, path: str) -> str:
         try:
@@ -633,5 +648,10 @@ def make_camera() -> Camera:
             config.ISAPI_TIMEOUT,
         )
     return Camera(
-        config.CAM_BASE, config.CAM_USER, config.CAM_PASS, config.RTSP_BASE, config.ISAPI_TIMEOUT
+        config.CAM_BASE,
+        config.CAM_USER,
+        config.CAM_PASS,
+        config.RTSP_BASE,
+        config.ISAPI_TIMEOUT,
+        verify=config.CAM_VERIFY,
     )
