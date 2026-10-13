@@ -353,15 +353,17 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 }
 #scrubber:disabled { opacity: .5; }
 
-.ranges { display: grid; gap: 8px; margin: 10px 0 4px; }
-.range-row {
+.files { display: grid; gap: 8px; margin: 6px 0 4px; }
+.file-row {
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
   padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center;
   justify-content: space-between; min-height: 44px;
 }
-.range-row .when { font-weight: 600; }
-.range-row .meta { color: var(--text-dim); font-size: 13px; }
-.range-row .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.file-row .when { font-weight: 600; }
+.file-row .meta { color: var(--text-dim); font-size: 13px; }
+.file-row .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.fileshead { margin: 14px 0 2px; font-size: 15px; }
+.files .empty { color: var(--text-dim); font-size: 14px; margin: 2px 0; }
 
 .playbar {
   position: sticky; bottom: calc(64px + env(safe-area-inset-bottom));

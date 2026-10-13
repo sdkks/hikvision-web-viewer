@@ -154,7 +154,7 @@ class ViewerApp:
             .replace("$to_val", esc(to_val))
             .replace("$results", results)
         )
-        self.render(handler, "Recordings", content, nav="recordings", code=code)
+        self.render(handler, "Recording Files", content, nav="recordings", code=code)
 
     def run_search(self, from_val: str, to_val: str):
         """Search and render results. Returns html str, or (html, http_code) on failure."""
@@ -435,6 +435,7 @@ class ViewerApp:
             "hour_clips": [0] * 24,
             "minutes": [[0] * 60 for _ in range(24)],
             "ranges": [],
+            "files": [],
         }
         try:
             clips = self.cam.search(

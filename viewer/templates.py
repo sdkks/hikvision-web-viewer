@@ -14,7 +14,7 @@ BASE = Template("""<!doctype html>
 <header class="top"><span class="brand">$brand</span>
 <nav class="tabs" aria-label="Sections">
 <a href="/" aria-current="$nav_live">Live</a>
-<a href="/recordings" aria-current="$nav_rec">Recordings</a>
+<a href="/recordings" aria-current="$nav_rec">Recording Files</a>
 </nav></header>
 <main>
 $content
@@ -45,7 +45,7 @@ LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
 <button id="retry" type="button" class="retry" hidden>Retry now</button>
 """
 
-RECORDINGS = """<h1>Recordings</h1>
+RECORDINGS = """<h1>Recording Files</h1>
 <div class="presets" aria-label="Quick ranges">
 <a href="/recordings?preset=today">Today</a>
 <a href="/recordings?preset=24h">Last 24 h</a>
@@ -81,6 +81,8 @@ RECORDINGS = """<h1>Recordings</h1>
 <span><span class="swatch unknown"></span>couldn't check</span>
 </p>
 <div class="hourgrid" id="hour-grid" role="group" aria-label="Hours of the day"></div>
+<h3 class="fileshead">Files on this day</h3>
+<div class="files" id="day-files"></div>
 </section>
 <section id="hour-view" hidden>
 <h3 id="hour-heading" tabindex="-1"></h3>
@@ -88,7 +90,8 @@ RECORDINGS = """<h1>Recordings</h1>
 <p id="scrub-readout" class="muted"></p>
 <input type="range" id="scrubber" min="0" max="59" step="1" value="0" aria-label="Minute of the hour" aria-describedby="scrub-readout">
 </div>
-<div class="ranges" id="range-rows"></div>
+<h3 class="fileshead">Files in this hour</h3>
+<div class="files" id="hour-files"></div>
 <div class="playbar" id="play-bar" hidden>
 <a class="playbtn" id="play-from" href="#">&#9654; Play from</a>
 </div>

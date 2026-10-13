@@ -4,7 +4,8 @@ A small, self-hosted web app to view a Hikvision camera **without the vendor clo
 Shows live view and recorded clips in the browser, honest about what the camera can and cannot do.
 
 - **Live view** — main (1080p) and sub (360p) channels, streamed as fragmented MP4 via ffmpeg.
-- **Recordings browser** — presets or exact range, plus a **browse-by-time picker**: pick a day,
+- **Recording Files** — presets or exact range list the files on the card (play/download each), plus a
+  **browse-by-time picker**: pick a day,
   see which hours have recordings, drill into an hour to see the recorded minutes, and play or
   download from any point. Copyable rtsp/ffmpeg escape hatches included.
 - **Honest states** — the camera's search service is known to be flaky; the UI distinguishes

@@ -84,9 +84,30 @@ def build_coverage(clips, day_start: datetime) -> dict:
         span["start_local"] = util.local_display(datetime.fromtimestamp(span["start_epoch"]))
         span["end_local"] = util.local_display(datetime.fromtimestamp(span["end_epoch"]))
 
+    # Individual recording files (what the SD card holds): each gets its own
+    # play/download row, so a window can be consumed file by file.
+    files: list[dict] = []
+    for clip in sorted(clips, key=lambda c: c.start_dt):
+        start = max(clip.start_dt.astimezone(), day_start)
+        end = min(clip.end_dt.astimezone(), day_end)
+        if end <= start:
+            continue
+        files.append(
+            {
+                "start_epoch": int(start.timestamp()),
+                "end_epoch": int(end.timestamp()),
+                "dur_s": int((end - start).total_seconds()),
+                "size": clip.size,
+                "name": clip.name,
+                "start_local": util.local_display(start),
+                "end_local": util.local_display(end),
+            }
+        )
+
     return {
         "hours": hours,
         "hour_clips": hour_clips,
         "minutes": minutes,
         "ranges": ranges,
+        "files": files,
     }

@@ -368,7 +368,6 @@
     const hourHeading = document.getElementById("hour-heading");
     const readout = document.getElementById("scrub-readout");
     const scrubber = document.getElementById("scrubber");
-    const rangeRows = document.getElementById("range-rows");
     const playBar = document.getElementById("play-bar");
     const playFrom = document.getElementById("play-from");
 
@@ -507,6 +506,14 @@
       const idleHint = document.getElementById("idle-hint");
       if (idleHint) idleHint.hidden = true;
 
+      renderFiles(
+        "day-files",
+        coverageUnknown(payload) ? [] : filesInDay(),
+        coverageUnknown(payload)
+          ? "Files can't be listed for this day (see above)."
+          : "No recording files on this day."
+      );
+
       const now = new Date();
       const isToday = isoDate(now) === payload.date;
       for (let hour = 0; hour < 24; hour++) {
@@ -552,17 +559,9 @@
       hourHeading.focus({ preventScroll: true });
     }
 
-    function rangesInHour(hour) {
-      const dayStart = new Date(`${state.coverage.date}T00:00:00`).getTime() / 1000;
-      const from = dayStart + hour * 3600;
-      const to = from + 3600;
-      return state.coverage.ranges.filter((r) => r.start_epoch < to && r.end_epoch > from);
-    }
-
     function renderHour() {
       const hour = state.hour;
       const minutes = state.coverage.minutes[hour];
-      const ranges = rangesInHour(hour);
       const covered = minutes.map((m, i) => (m > 0 ? i : -1)).filter((i) => i >= 0);
 
       // minute strip: covered minutes filled, empty minutes paper
@@ -580,35 +579,64 @@
         playBar.hidden = true;
         const emptyNote = document.getElementById("play-note");
         if (emptyNote) emptyNote.hidden = true;
-        rangeRows.textContent = "";
+        renderFiles("hour-files", [], "No recording files in this hour.");
         return;
       }
       const initial = state.minute !== null && minutes[state.minute] > 0 ? state.minute : covered[0];
       scrubber.value = String(initial);
       updateMinute(initial, { push: false });
 
-      rangeRows.textContent = "";
-      for (const range of ranges) {
-        const row = document.createElement("div");
-        row.className = "range-row";
-        row.innerHTML =
-          `<span class="when">${hhmm(range.start_epoch)} → ${hhmm(range.end_epoch)}</span>` +
-          `<span class="meta">${humanDuration(range.dur_s)} · ${humanSize(range.size)}` +
-          (range.clips > 1 ? ` · ${range.clips} clips` : "") + `</span>`;
-        const acts = document.createElement("span");
-        acts.className = "acts";
-        const play = document.createElement("a");
-        play.className = "playbtn";
-        play.textContent = "▶ Play";
-        play.href = playHref(range.start_epoch, range.end_epoch, range.size);
-        const dl = document.createElement("a");
-        dl.className = "dlbtn";
-        dl.textContent = "⬇ Download";
-        dl.href = `/download?from=${camTime(range.start_epoch)}&to=${camTime(range.end_epoch)}&size=${range.size}`;
-        acts.append(play, dl);
-        row.append(acts);
-        rangeRows.append(row);
+      renderFiles("hour-files", filesInHour(hour), "No recording files in this hour.");
+    }
+
+    function fileRow(file) {
+      const row = document.createElement("div");
+      row.className = "file-row";
+      row.innerHTML =
+        `<span class="when">${hhmm(file.start_epoch)} → ${hhmm(file.end_epoch)}</span>` +
+        `<span class="meta">${humanDuration(file.dur_s)} · ${humanSize(file.size)}</span>`;
+      const acts = document.createElement("span");
+      acts.className = "acts";
+      const play = document.createElement("a");
+      play.className = "playbtn";
+      play.textContent = "▶ Play";
+      play.href = playHref(file.start_epoch, file.end_epoch, file.size);
+      const dl = document.createElement("a");
+      dl.className = "dlbtn";
+      dl.textContent = "⬇ Download";
+      // By-name download targets this exact file on the card.
+      dl.href =
+        `/download?from=${camTime(file.start_epoch)}&to=${camTime(file.end_epoch)}` +
+        (file.name ? `&name=${encodeURIComponent(file.name)}` : "") +
+        `&size=${file.size}`;
+      acts.append(play, dl);
+      row.append(acts);
+      return row;
+    }
+
+    function renderFiles(containerId, files, emptyText) {
+      const box = document.getElementById(containerId);
+      if (!box) return;
+      box.textContent = "";
+      if (!files.length) {
+        const p = document.createElement("p");
+        p.className = "empty";
+        p.textContent = emptyText;
+        box.append(p);
+        return;
       }
+      for (const file of files) box.append(fileRow(file));
+    }
+
+    function filesInDay() {
+      return state.coverage.files || [];
+    }
+
+    function filesInHour(hour) {
+      const dayStart = new Date(`${state.coverage.date}T00:00:00`).getTime() / 1000;
+      const from = dayStart + hour * 3600;
+      const to = from + 3600;
+      return filesInDay().filter((f) => f.start_epoch < to && f.end_epoch > from);
     }
 
     function humanDuration(seconds) {
