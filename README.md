@@ -90,6 +90,9 @@ VIEWER_CONFIG=/config/camera.json      # podman: -v ./camera.json:/config/camera
 
 The file wins for the fields it sets and `HIK_*` fills the rest; a disagreement is reported
 once at startup (passwords never echoed), so the effective configuration is never a guess.
+`host` is a bare host name or IP address — the scheme comes from `tls`, not from the host
+string, and a repeated key, an unknown key or a malformed value is refused rather than
+ignored.
 A missing, unreadable, malformed or invalid file — or an unknown key, such as a typo'd
 `usr` — stops startup with a message naming the path and the problem, before a port is
 bound. The viewer never starts from defaults because the file was broken.
