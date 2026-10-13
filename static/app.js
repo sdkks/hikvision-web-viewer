@@ -44,6 +44,19 @@
     }
   }
 
+  function browserName() {
+    var ua = navigator.userAgent;
+    if (navigator.brave) return "Brave";
+    if (/Edg\//.test(ua)) return "Edge";
+    if (/OPR\//.test(ua)) return "Opera";
+    if (/FxiOS/.test(ua)) return "Firefox on iOS";
+    if (/Firefox\//.test(ua)) return "Firefox";
+    if (/CriOS/.test(ua)) return "Chrome on iOS";
+    if (/Chrome\//.test(ua)) return "Chrome";
+    if (/Safari\//.test(ua)) return "Safari";
+    return "This browser";
+  }
+
   function tapStartButton() {
     return document.getElementById("tap-start");
   }
@@ -51,6 +64,15 @@
   function showTapStart(video) {
     var btn = tapStartButton();
     if (!btn) return;
+    var label = btn.dataset.label || "view";
+    var name = browserName();
+    btn.innerHTML =
+      name + " doesn&rsquo;t permit autoplay in this tab. " +
+      '<span class="act">Click or tap to play</span>';
+    btn.setAttribute(
+      "aria-label",
+      name + " does not permit autoplay in this tab. Activate to play the " + label + "."
+    );
     btn.hidden = false;
     btn.onclick = function () {
       btn.hidden = true;
@@ -153,7 +175,9 @@
 
     video.addEventListener("playing", function () {
       playedOnce = true;
-      hideTapStart();
+      // A stale "playing" from the previous channel can fire during teardown;
+      // only clear the prompt when playback is genuinely running.
+      if (!video.paused && video.readyState >= 2) hideTapStart();
       setStatus("ok", opts.live ? "Live" : "Playing");
       if (opts.kind === "play" && !t0) t0 = Date.now();
     });

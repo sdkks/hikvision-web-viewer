@@ -30,7 +30,7 @@ LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
 <div class="videowrap">
 <video id="live-video" data-channel="$channel" data-codecs="$codec_set" autoplay muted playsinline controls
        poster="/snapshot?ch=$channel"></video>
-<button type="button" id="tap-start" class="tapstart" hidden>&#9654; Tap to start live view</button>
+<button type="button" id="tap-start" class="tapstart" data-label="live view" hidden>Click or tap to play</button>
 </div>
 <div class="channelbar" role="group" aria-label="Channel">
 <button type="button" class="chan" data-channel="101" aria-pressed="$p_main">$main_label</button>
@@ -103,7 +103,7 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <div class="videowrap">
 <video id="clip-video" autoplay muted playsinline controls data-codecs="hevc"
        data-url="/hls/play/index.m3u8?from=$from_cam&amp;to=$to_cam" data-expected="$dur_s"></video>
-<button type="button" id="tap-start" class="tapstart" hidden>&#9654; Tap to start playback</button>
+<button type="button" id="tap-start" class="tapstart" data-label="recording" hidden>Click or tap to play</button>
 </div>
 <p class="honest">Plays in real time &mdash; a $dur_h clip takes $dur_h. No seeking.</p>
 <p class="fallback"><a href="/snapshot?ch=101">Still image (main)</a><a href="/snapshot?ch=102">Still image (sub)</a></p>
