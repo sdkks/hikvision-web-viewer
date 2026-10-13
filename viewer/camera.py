@@ -11,6 +11,7 @@ Error model (maps 1:1 to the UI's honest states):
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from xml.etree import ElementTree
 
 import requests
 from requests.auth import HTTPDigestAuth
@@ -104,16 +105,7 @@ class Camera:
 
     def storage(self) -> dict:
         xml = self._get("/ISAPI/ContentMgmt/Storage")
-        first_hdd = re.search(r"<hdd>.*?</hdd>", xml, re.S)
-        if not first_hdd:
-            raise BadResponseError("no <hdd> element in storage reply")
-        blob = first_hdd.group(0)
-        return {
-            "status": _xml_text(blob, "status"),
-            "capacity_mb": _int_text(blob, "capacity"),
-            "free_mb": _int_text(blob, "freeSpace"),
-            "writable": _xml_text(blob, "property") == "RW",
-        }
+        return parse_storage_response(xml)
 
     def search(self, iso_from: str, iso_to: str, max_results: int = 100) -> list[Clip]:
         """Search recordings on track 101. Raises ServiceDownError when the service is flaky."""
@@ -288,6 +280,40 @@ class MockCamera(Camera):
         if path in self._CANNED:
             return self._CANNED[path]
         raise ServiceDownError(f"mock has no fixture for {path}")
+
+
+def _first_element(xml_text: str, local_name: str):
+    """First element with this local name, ignoring XML namespaces/attributes.
+
+    Camera firmware varies: elements may carry attributes and be namespaced, so
+    naive string matching (`<hdd>`) breaks. Returns None if absent/unparseable.
+    """
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError:
+        return None
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] == local_name:
+            return element
+    return None
+
+
+def parse_storage_response(xml_text: str) -> dict:
+    """Parse /ISAPI/ContentMgmt/Storage into capacity/free/status/writable."""
+    hdd = _first_element(xml_text, "hdd")
+    if hdd is None:
+        raise BadResponseError("no <hdd> element in storage reply")
+    values = {child.tag.rsplit("}", 1)[-1]: (child.text or "").strip() for child in hdd}
+    capacity = values.get("capacity", "")
+    free = values.get("freeSpace", "")
+    if not capacity.isdigit():
+        raise BadResponseError("storage reply has no capacity")
+    return {
+        "status": values.get("status", ""),
+        "capacity_mb": int(capacity),
+        "free_mb": int(free) if free.isdigit() else 0,
+        "writable": values.get("property", "") == "RW",
+    }
 
 
 def parse_search_response(xml_text: str, rtsp_base: str) -> list[Clip]:

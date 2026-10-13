@@ -105,6 +105,37 @@ class IsoToCamTests(unittest.TestCase):
         self.assertEqual(camera._iso_to_cam("not-a-date"), "")
 
 
+class StorageParseTests(unittest.TestCase):
+    """Real camera replies carry attributes and namespaces; parsing must survive."""
+
+    REAL_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<storage version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
+        '<hddList version="1.0" xmlns="http://www.hikvision.com/ver10/XMLSchema" size="8" >\n'
+        '<hdd version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
+        "<id>1</id><hddName>hdde</hddName><hddPath></hddPath><hddType>SATA</hddType>\n"
+        "<status>ok</status><capacity>244016</capacity><freeSpace>242432</freeSpace>\n"
+        "<property>RW</property>\n</hdd>\n</hddList>\n"
+        '<nasList version="2.0"><supportMountType opt="NFS,SMB/CIFS"/></nasList>\n'
+        "<workMode>quota</workMode>\n</storage>"
+    )
+
+    def test_parses_namespaced_hdd_with_attributes(self):
+        parsed = camera.parse_storage_response(self.REAL_XML)
+        self.assertEqual(parsed["status"], "ok")
+        self.assertEqual(parsed["capacity_mb"], 244016)
+        self.assertEqual(parsed["free_mb"], 242432)
+        self.assertTrue(parsed["writable"])
+
+    def test_rejects_reply_without_hdd(self):
+        with self.assertRaises(camera.BadResponseError):
+            camera.parse_storage_response("<storage><nasList/></storage>")
+
+    def test_rejects_unparseable_reply(self):
+        with self.assertRaises(camera.BadResponseError):
+            camera.parse_storage_response("<html>login required</html>")
+
+
 class OrphanCleanupTests(unittest.TestCase):
     def test_missing_pkill_does_not_raise(self):
         """Minimal container images have no pkill; session start must survive."""

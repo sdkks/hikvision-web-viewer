@@ -52,8 +52,14 @@ class ViewerApp:
                 f"SD {util.human_size(sd['free_mb'] * 1024 * 1024)} free of "
                 f"{util.human_size(sd['capacity_mb'] * 1024 * 1024)}"
             )
+        except camera.ServiceDownError:
+            line = "SD storage: service not responding"
+        except camera.UnreachableError:
+            line = "SD storage: camera unreachable"
+        except camera.BadResponseError:
+            line = "SD storage: unexpected reply"
         except camera.CameraError:
-            line = "SD storage: unavailable (camera app layer down)"
+            line = "SD storage: unavailable"
         try:
             info = self.cam.device_info()
             fw = f"{info.get('firmwareVersion', '')} {info.get('firmwareReleasedDate', '')}".strip()
