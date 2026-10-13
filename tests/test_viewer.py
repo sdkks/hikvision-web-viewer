@@ -7,39 +7,44 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TypedDict, cast
 from unittest import mock
+
+import urllib3
 
 from viewer import app as viewer_app
 from viewer import camera, config, config_file, coverage, motion, streams, util
 
 
 class TimeTests(unittest.TestCase):
-    def test_cam_time_round_trip(self):
+    def test_cam_time_round_trip(self) -> None:
         dt = util.parse_cam_time("20261012T194808Z")
         self.assertEqual(dt.tzinfo, timezone.utc)
         self.assertEqual(util.to_cam_time(dt), "20261012T194808Z")
 
-    def test_parse_user_range_rejects_inverted(self):
+    def test_parse_user_range_rejects_inverted(self) -> None:
         with self.assertRaises(ValueError):
             util.parse_user_range("2026-10-13T10:00", "2026-10-13T09:00")
 
-    def test_parse_user_range_rejects_garbage(self):
+    def test_parse_user_range_rejects_garbage(self) -> None:
         with self.assertRaises(ValueError):
             util.parse_user_range("yesterday", "tomorrow")
 
-    def test_parse_user_range_accepts_minute_precision(self):
+    def test_parse_user_range_accepts_minute_precision(self) -> None:
         frm, to = util.parse_user_range("2026-10-13T10:00", "2026-10-13T11:30")
         self.assertLess(frm, to)
         self.assertIsNotNone(frm.tzinfo)
 
-    def test_human_duration(self):
+    def test_human_duration(self) -> None:
         self.assertEqual(util.human_duration(45), "45 s")
         self.assertEqual(util.human_duration(138), "2 min 18 s")
         self.assertEqual(util.human_duration(3725), "1 h 02 min")
 
-    def test_human_size(self):
+    def test_human_size(self) -> None:
         self.assertEqual(util.human_size(512), "512 B")
         self.assertEqual(util.human_size(264532808), "252.3 MB")
 
@@ -50,13 +55,13 @@ class PlaybackUriTests(unittest.TestCase):
         "&amp;endtime=20261012T201036Z&amp;name=ch01_00000000000000000&amp;size=264532808"
     )
 
-    def test_normalize_unescapes_and_rewrites_host(self):
+    def test_normalize_unescapes_and_rewrites_host(self) -> None:
         out = util.normalize_playback_uri(self.URI, "rtsp://10.0.0.5:554")
         self.assertTrue(out.startswith("rtsp://10.0.0.5:554/Streaming/tracks/"))
         self.assertNotIn("&amp;", out)
         self.assertIn("starttime=20261012T194808Z", out)
 
-    def test_clip_fields(self):
+    def test_clip_fields(self) -> None:
         uri = util.normalize_playback_uri(self.URI, "rtsp://192.168.0.156:554")
         fields = util.clip_fields(uri)
         self.assertEqual(fields["starttime"], "20261012T194808Z")
@@ -77,7 +82,7 @@ class SearchParseTests(unittest.TestCase):
         "</searchMatchItem></CMSearchResult>"
     )
 
-    def test_parse_search_response(self):
+    def test_parse_search_response(self) -> None:
         clips = camera.parse_search_response(self.RESPONSE, "rtsp://192.168.0.156:554")
         self.assertEqual(len(clips), 1)
         clip = clips[0]
@@ -86,13 +91,13 @@ class SearchParseTests(unittest.TestCase):
         self.assertEqual(clip.duration_s, 22 * 60 + 28)
         self.assertEqual(clip.size, 1000)
 
-    def test_parse_search_response_rejects_protocol_drift(self):
+    def test_parse_search_response_rejects_protocol_drift(self) -> None:
         with self.assertRaises(camera.BadResponseError):
             camera.parse_search_response("<html>login page</html>", "rtsp://x")
 
 
 class MockCameraTests(unittest.TestCase):
-    def test_mock_endpoints(self):
+    def test_mock_endpoints(self) -> None:
         cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
         self.assertIn("mock", cam.device_info()["model"].lower())
         self.assertEqual(cam.status()["uptime_s"], 4242)
@@ -102,20 +107,20 @@ class MockCameraTests(unittest.TestCase):
 
 
 class IsoToCamTests(unittest.TestCase):
-    def test_iso_with_z(self):
+    def test_iso_with_z(self) -> None:
         self.assertEqual(camera._iso_to_cam("2026-10-12T19:48:08Z"), "20261012T194808Z")
 
-    def test_iso_space_form(self):
+    def test_iso_space_form(self) -> None:
         self.assertEqual(camera._iso_to_cam("2026-10-12 19:48:08"), "20261012T194808Z")
 
-    def test_garbage_returns_empty(self):
+    def test_garbage_returns_empty(self) -> None:
         self.assertEqual(camera._iso_to_cam("not-a-date"), "")
 
 
 class CoverageTests(unittest.TestCase):
     """Day coverage aggregation for the picker (pure logic)."""
 
-    def _clip(self, start_cam, end_cam, size=1000):
+    def _clip(self, start_cam: str, end_cam: str, size: int = 1000) -> camera.Clip:
         return camera.Clip(
             uri="rtsp://x",
             uri_escaped="rtsp://x",
@@ -128,7 +133,7 @@ class CoverageTests(unittest.TestCase):
             ),
         )
 
-    def test_buckets_and_merge(self):
+    def test_buckets_and_merge(self) -> None:
         day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
         # two adjacent clips inside hour 3 local: 03:10-03:20 and 03:20-03:40
         base = day.replace(hour=3, minute=10)
@@ -154,7 +159,7 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(built["ranges"][0]["size"], 300)
         self.assertEqual(built["hours"][5], 0)
 
-    def test_clips_outside_the_day_are_clamped_away(self):
+    def test_clips_outside_the_day_are_clamped_away(self) -> None:
         day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
         other = day + timedelta(days=2)
         clip = self._clip(
@@ -165,7 +170,7 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(built["hours"], [0] * 24)
         self.assertEqual(built["ranges"], [])
 
-    def test_levels_quantize(self):
+    def test_levels_quantize(self) -> None:
         self.assertEqual(coverage._level(0), 0)
         self.assertEqual(coverage._level(5), 1)
         self.assertEqual(coverage._level(30), 2)
@@ -176,7 +181,7 @@ class CoverageTests(unittest.TestCase):
 class NeighbourTests(unittest.TestCase):
     """Neighbour navigation must report the gap a jump would skip."""
 
-    def _file(self, start, end, name="f"):
+    def _file(self, start: int, end: int, name: str = "f") -> coverage.FileRecord:
         return {
             "start_epoch": start,
             "end_epoch": end,
@@ -187,7 +192,7 @@ class NeighbourTests(unittest.TestCase):
             "end_local": "",
         }
 
-    def test_earlier_later_and_gaps(self):
+    def test_earlier_later_and_gaps(self) -> None:
         files = [self._file(0, 100), self._file(160, 260), self._file(1000, 1100)]
         out = coverage.neighbours(files, current_from=160, current_to=260)
         self.assertEqual([f["start_epoch"] for f in out["earlier"]], [0])
@@ -196,7 +201,7 @@ class NeighbourTests(unittest.TestCase):
         self.assertEqual(out["later"][0]["gap_s"], 740)  # 260 -> 1000 is empty
         self.assertFalse(out["more_later"])
 
-    def test_limit_and_truncation_flags(self):
+    def test_limit_and_truncation_flags(self) -> None:
         files = [self._file(i * 1000, i * 1000 + 100) for i in range(1, 9)]
         out = coverage.neighbours(files, current_from=1000, current_to=1100, limit=2)
         self.assertEqual(len(out["earlier"]), 0)
@@ -219,18 +224,18 @@ class StorageParseTests(unittest.TestCase):
         "<workMode>quota</workMode>\n</storage>"
     )
 
-    def test_parses_namespaced_hdd_with_attributes(self):
+    def test_parses_namespaced_hdd_with_attributes(self) -> None:
         parsed = camera.parse_storage_response(self.REAL_XML)
         self.assertEqual(parsed["status"], "ok")
         self.assertEqual(parsed["capacity_mb"], 244016)
         self.assertEqual(parsed["free_mb"], 242432)
         self.assertTrue(parsed["writable"])
 
-    def test_rejects_reply_without_hdd(self):
+    def test_rejects_reply_without_hdd(self) -> None:
         with self.assertRaises(camera.BadResponseError):
             camera.parse_storage_response("<storage><nasList/></storage>")
 
-    def test_rejects_unparseable_reply(self):
+    def test_rejects_unparseable_reply(self) -> None:
         with self.assertRaises(camera.BadResponseError):
             camera.parse_storage_response("<html>login required</html>")
 
@@ -238,19 +243,19 @@ class StorageParseTests(unittest.TestCase):
 class ErrorClassifyTests(unittest.TestCase):
     """A connect failure is 'unreachable'; a slow but connected reply is a service problem."""
 
-    def test_connect_timeout_is_unreachable(self):
+    def test_connect_timeout_is_unreachable(self) -> None:
         import requests
 
         exc = requests.exceptions.ConnectTimeout("connect timeout")
         self.assertIsInstance(camera._classify_requests_error(exc), camera.UnreachableError)
 
-    def test_connection_error_is_unreachable(self):
+    def test_connection_error_is_unreachable(self) -> None:
         import requests
 
         exc = requests.exceptions.ConnectionError("no route")
         self.assertIsInstance(camera._classify_requests_error(exc), camera.UnreachableError)
 
-    def test_read_timeout_is_service_down(self):
+    def test_read_timeout_is_service_down(self) -> None:
         import requests
 
         exc = requests.exceptions.ReadTimeout("server too slow")
@@ -258,7 +263,7 @@ class ErrorClassifyTests(unittest.TestCase):
 
 
 class OrphanCleanupTests(unittest.TestCase):
-    def test_missing_pkill_does_not_raise(self):
+    def test_missing_pkill_does_not_raise(self) -> None:
         """Minimal container images have no pkill; session start must survive."""
         from pathlib import Path
 
@@ -271,15 +276,15 @@ class OrphanCleanupTests(unittest.TestCase):
 class BasicAuthTests(unittest.TestCase):
     """Viewer-side HTTP Basic Auth: active only when both env vars are set."""
 
-    def _with_auth(self, user, password):
+    def _with_auth(self, user: str, password: str) -> AbstractContextManager[object]:
         return mock.patch.multiple(config, AUTH_USER=user, AUTH_PASSWORD=password)
 
-    def test_no_auth_configured_allows_anything(self):
+    def test_no_auth_configured_allows_anything(self) -> None:
         with self._with_auth("", ""):
             self.assertTrue(viewer_app.check_auth(None))
             self.assertTrue(viewer_app.check_auth("Basic anything"))
 
-    def test_configured_requires_valid_credentials(self):
+    def test_configured_requires_valid_credentials(self) -> None:
         import base64
 
         good = "Basic " + base64.b64encode(b"alice:s3cret").decode()
@@ -299,15 +304,15 @@ class BasicAuthTests(unittest.TestCase):
 class MotionGridTests(unittest.TestCase):
     """Decode/encode the camera's 18x22 bit map - one source of truth (motion.py)."""
 
-    def test_all_armed_row_is_fffffc(self):
+    def test_all_armed_row_is_fffffc(self) -> None:
         rows = motion.decode_gridmap("fffffc" * 18)
         self.assertTrue(all(all(row) for row in rows))
         self.assertEqual(motion.encode_gridmap(rows), "fffffc" * 18)
 
-    def test_empty_grid_round_trip(self):
+    def test_empty_grid_round_trip(self) -> None:
         self.assertEqual(motion.encode_gridmap(motion.empty_grid()), "000000" * 18)
 
-    def test_first_cell_is_the_msb(self):
+    def test_first_cell_is_the_msb(self) -> None:
         one = motion.empty_grid()
         one[0][0] = True
         self.assertTrue(motion.encode_gridmap(one).startswith("800000"))
@@ -315,12 +320,12 @@ class MotionGridTests(unittest.TestCase):
         last[0][21] = True
         self.assertTrue(motion.encode_gridmap(last).startswith("000004"))
 
-    def test_padding_bits_are_not_cells(self):
+    def test_padding_bits_are_not_cells(self) -> None:
         # The two low bits of each row are padding: setting them adds no cells.
         rows = motion.decode_gridmap("000003" + "000000" * 17)
         self.assertFalse(any(rows[0]))
 
-    def test_encode_preserves_padding_bits_from_base(self):
+    def test_encode_preserves_padding_bits_from_base(self) -> None:
         base = "000003" * 18  # padding bits set, no cells armed
         rows = motion.decode_gridmap(base)
         self.assertEqual(motion.encode_gridmap(rows), "000000" * 18)
@@ -328,7 +333,7 @@ class MotionGridTests(unittest.TestCase):
         rows[0][0] = True
         self.assertEqual(motion.encode_gridmap(rows, base_grid_map=base), "800003" + "000003" * 17)
 
-    def test_vendor_worked_example(self):
+    def test_vendor_worked_example(self) -> None:
         # Worked example from Hikvision's ISAPI IPMD Service guide: 108 hex chars
         # that decode to a person-shaped blob (row 7 cols 9-11; rows 8-10 cols
         # 9-12, 1-based) plus a corner block (rows 15-18, cols 1-4). Locks the
@@ -348,19 +353,19 @@ class MotionGridTests(unittest.TestCase):
         self.assertEqual(armed, expected)
         self.assertEqual(motion.encode_gridmap(rows), vendor)
 
-    def test_round_trip_asymmetric_pattern(self):
+    def test_round_trip_asymmetric_pattern(self) -> None:
         rows = motion.empty_grid()
         rows[3][5] = rows[3][6] = rows[3][7] = True
         rows[17][0] = True
         self.assertEqual(motion.decode_gridmap(motion.encode_gridmap(rows)), rows)
 
-    def test_wrong_length_and_non_hex_rejected(self):
+    def test_wrong_length_and_non_hex_rejected(self) -> None:
         with self.assertRaises(ValueError):
             motion.decode_gridmap("fff")
         with self.assertRaises(ValueError):
             motion.decode_gridmap("g" * 108)
 
-    def test_arm_mask_invert(self):
+    def test_arm_mask_invert(self) -> None:
         rows = motion.empty_grid()
         motion.set_region(rows, 0, 0, 2, 3, True)
         self.assertEqual(motion.counts(rows)["armed"], 6)
@@ -370,7 +375,7 @@ class MotionGridTests(unittest.TestCase):
         motion.invert(rows)
         self.assertEqual(motion.counts(rows)["armed"], 396 - 1)
 
-    def test_quick_zone_is_whole_cells(self):
+    def test_quick_zone_is_whole_cells(self) -> None:
         rows = motion.empty_grid()
         motion.apply_tool_to_zone(rows, 0, 0, True)
         self.assertEqual(motion.counts(rows)["armed"], 3 * 11)
@@ -378,20 +383,20 @@ class MotionGridTests(unittest.TestCase):
         self.assertFalse(rows[0][11])  # right half untouched
         self.assertFalse(rows[3][0])  # next band untouched
 
-    def test_summary_counts(self):
+    def test_summary_counts(self) -> None:
         rows = motion.empty_grid()
         motion.set_region(rows, 0, 0, 18, 11, True)  # 18 x 11 = 198
         counted = motion.counts(rows)
         self.assertEqual(counted, {"armed": 198, "masked": 198, "total": 396})
         self.assertEqual(motion.summary(counted), "198 of 396 cells armed (50%)")
 
-    def test_sensitivity_validation(self):
+    def test_sensitivity_validation(self) -> None:
         for value in (0, 20, 40, 60, 80, 100):
             self.assertTrue(motion.valid_sensitivity(value))
         for invalid_value in (55, -20, 101, "60", True, None):
             self.assertFalse(motion.valid_sensitivity(invalid_value))
 
-    def test_diff_reports_drift(self):
+    def test_diff_reports_drift(self) -> None:
         import copy
 
         base = {
@@ -410,10 +415,10 @@ class MotionGridTests(unittest.TestCase):
 class MotionCameraTests(unittest.TestCase):
     """Read-modify-write of the motionDetection document (mock round-trip)."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
 
-    def test_parse_motion_detection(self):
+    def test_parse_motion_detection(self) -> None:
         doc = self.cam.motion_detection()
         self.assertFalse(doc["enabled"])
         self.assertEqual(doc["sensitivityLevel"], 40)
@@ -422,7 +427,7 @@ class MotionCameraTests(unittest.TestCase):
         self.assertEqual(doc["columnGranularity"], "22")
         self.assertEqual(motion.validate_gridmap(doc["gridMap"]), doc["gridMap"])
 
-    def test_read_modify_write_round_trips(self):
+    def test_read_modify_write_round_trips(self) -> None:
         merged = camera.apply_motion_fields(
             self.cam.motion_detection_xml(),
             enabled=True,
@@ -440,12 +445,12 @@ class MotionCameraTests(unittest.TestCase):
         self.assertEqual(doc["samplingInterval"], "2")
         self.assertEqual(doc["regionType"], "grid")
 
-    def test_apply_registers_default_namespace(self):
+    def test_apply_registers_default_namespace(self) -> None:
         merged = camera.apply_motion_fields(self.cam.motion_detection_xml(), enabled=True)
         self.assertIn('xmlns="http://www.hikvision.com/ver20/XMLSchema"', merged)
         self.assertNotIn("ns0:", merged)
 
-    def test_parse_rejects_short_grid(self):
+    def test_parse_rejects_short_grid(self) -> None:
         bad = (
             "<MotionDetection xmlns='http://www.hikvision.com/ver20/XMLSchema'>"
             "<MotionDetectionLayout><layout><gridMap>short</gridMap></layout>"
@@ -454,7 +459,7 @@ class MotionCameraTests(unittest.TestCase):
         with self.assertRaises(camera.BadResponseError):
             camera.parse_motion_detection(bad)
 
-    def test_parse_rejects_non_xml(self):
+    def test_parse_rejects_non_xml(self) -> None:
         with self.assertRaises(camera.BadResponseError):
             camera.parse_motion_detection("<html>login required</html>")
 
@@ -462,10 +467,10 @@ class MotionCameraTests(unittest.TestCase):
 class MotionApiGuardTests(unittest.TestCase):
     """Origin + content-type guard on the app's first mutating endpoint."""
 
-    def _handler(self, headers):
+    def _handler(self, headers: dict[str, str]) -> mock.Mock:
         return mock.Mock(headers=headers)
 
-    def test_allows_same_origin_json(self):
+    def test_allows_same_origin_json(self) -> None:
         handler = self._handler(
             {
                 "Origin": "http://127.0.0.1:8756",
@@ -475,13 +480,13 @@ class MotionApiGuardTests(unittest.TestCase):
         )
         self.assertTrue(viewer_app.check_same_origin(handler))
 
-    def test_allows_missing_origin_json(self):
+    def test_allows_missing_origin_json(self) -> None:
         handler = self._handler(
             {"Host": "127.0.0.1:8756", "Content-Type": "application/json; charset=utf-8"}
         )
         self.assertTrue(viewer_app.check_same_origin(handler))
 
-    def test_rejects_cross_origin(self):
+    def test_rejects_cross_origin(self) -> None:
         handler = self._handler(
             {
                 "Origin": "http://evil.example",
@@ -491,13 +496,13 @@ class MotionApiGuardTests(unittest.TestCase):
         )
         self.assertFalse(viewer_app.check_same_origin(handler))
 
-    def test_rejects_non_json(self):
+    def test_rejects_non_json(self) -> None:
         handler = self._handler(
             {"Host": "127.0.0.1:8756", "Content-Type": "application/x-www-form-urlencoded"}
         )
         self.assertFalse(viewer_app.check_same_origin(handler))
 
-    def test_intent_validation(self):
+    def test_intent_validation(self) -> None:
         app = viewer_app.ViewerApp()
         intent = app._motion_intent(
             {
@@ -517,7 +522,7 @@ class MotionApiGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 app._motion_intent(bad)
 
-    def test_intent_rejects_non_boolean_cells(self):
+    def test_intent_rejects_non_boolean_cells(self) -> None:
         # bool("0") is True: a truthy string must not arm a cell the caller
         # asked to leave masked while the error promises a boolean array.
         app = viewer_app.ViewerApp()
@@ -526,7 +531,7 @@ class MotionApiGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app._motion_intent({"cells": rows, "sensitivity": 40})
 
-    def test_rejects_rebound_host_even_when_origin_matches(self):
+    def test_rejects_rebound_host_even_when_origin_matches(self) -> None:
         # A DNS-rebinding attacker controls both Host and Origin, so they match;
         # the Host allowlist is what rejects the request.
         handler = self._handler(
@@ -541,17 +546,17 @@ class MotionApiGuardTests(unittest.TestCase):
         assert reason is not None
         self.assertIn("VIEWER_ALLOWED_HOSTS", reason)
 
-    def test_accepts_loopback_host_names(self):
+    def test_accepts_loopback_host_names(self) -> None:
         for host in ("localhost:8756", "127.0.0.1", "[::1]:8756"):
             handler = self._handler({"Host": host, "Content-Type": "application/json"})
             self.assertTrue(viewer_app.check_same_origin(handler), host)
 
-    def test_accepts_configured_allowed_host(self):
+    def test_accepts_configured_allowed_host(self) -> None:
         with mock.patch.object(config, "ALLOWED_HOSTS", ("cam.local",)):
             handler = self._handler({"Host": "CAM.local:9000", "Content-Type": "application/json"})
             self.assertTrue(viewer_app.check_same_origin(handler))
 
-    def test_rejects_media_type_substring(self):
+    def test_rejects_media_type_substring(self) -> None:
         handler = self._handler({"Host": "127.0.0.1", "Content-Type": "application/jsonp"})
         self.assertFalse(viewer_app.check_same_origin(handler))
 
@@ -559,27 +564,27 @@ class MotionApiGuardTests(unittest.TestCase):
 class CameraPutMappingTests(unittest.TestCase):
     """Camera._put maps HTTP status to the honest error classes."""
 
-    def _cam_with(self, status, text=""):
+    def _cam_with(self, status: int, text: str = "") -> camera.Camera:
         cam = camera.Camera("http://cam", "u", "p", "rtsp://cam", 5)
         response = mock.Mock(status_code=status, text=text)
         cam.session = mock.Mock()
         cam.session.put.return_value = response
         return cam
 
-    def test_403_is_rejected_not_service_down(self):
+    def test_403_is_rejected_not_service_down(self) -> None:
         cam = self._cam_with(403, "<statusString>Invalid Operation</statusString>")
         with self.assertRaises(camera.RejectedError):
             cam._put("/ISAPI/x", "<body/>")
 
-    def test_400_is_bad_response(self):
+    def test_400_is_bad_response(self) -> None:
         with self.assertRaises(camera.BadResponseError):
             self._cam_with(400, "bad")._put("/ISAPI/x", "<body/>")
 
-    def test_415_is_bad_response(self):
+    def test_415_is_bad_response(self) -> None:
         with self.assertRaises(camera.BadResponseError):
             self._cam_with(415, "bad")._put("/ISAPI/x", "<body/>")
 
-    def test_500_is_service_down(self):
+    def test_500_is_service_down(self) -> None:
         with self.assertRaises(camera.ServiceDownError):
             self._cam_with(500, "boom")._put("/ISAPI/x", "<body/>")
 
@@ -587,51 +592,51 @@ class CameraPutMappingTests(unittest.TestCase):
 class CameraCredentialsMappingTests(unittest.TestCase):
     """A 401 is "credentials refused", never collapsed into "did not answer"."""
 
-    def _cam(self):
+    def _cam(self) -> camera.Camera:
         return camera.Camera("http://cam", "u", "p", "rtsp://cam", 5)
 
-    def test_401_is_credentials_and_stays_a_camera_error(self):
+    def test_401_is_credentials_and_stays_a_camera_error(self) -> None:
         # Subclassing CameraError/ServiceDownError is what keeps every existing
         # failure path typed (and stops a new type escaping a handler as a 500).
         self.assertTrue(issubclass(camera.CredentialsRejectedError, camera.CameraError))
         self.assertTrue(issubclass(camera.CredentialsRejectedError, camera.ServiceDownError))
 
-    def test_get_401_is_credentials(self):
+    def test_get_401_is_credentials(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         cam.session.get.return_value = mock.Mock(status_code=401, text="")
         with self.assertRaises(camera.CredentialsRejectedError):
             cam._get("/ISAPI/System/deviceInfo")
 
-    def test_get_500_is_still_service_down(self):
+    def test_get_500_is_still_service_down(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         cam.session.get.return_value = mock.Mock(status_code=500, text="")
         with self.assertRaises(camera.ServiceDownError):
             cam._get("/ISAPI/System/deviceInfo")
 
-    def test_put_401_is_credentials(self):
+    def test_put_401_is_credentials(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         cam.session.put.return_value = mock.Mock(status_code=401, text="")
         with self.assertRaises(camera.CredentialsRejectedError):
             cam._put("/ISAPI/x", "<body/>")
 
-    def test_search_401_is_credentials(self):
+    def test_search_401_is_credentials(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         cam.session.post.return_value = mock.Mock(status_code=401, text="")
         with self.assertRaises(camera.CredentialsRejectedError):
             cam.search("2026-10-12T00:00:00Z", "2026-10-13T00:00:00Z")
 
-    def test_snapshot_401_is_credentials(self):
+    def test_snapshot_401_is_credentials(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         cam.session.get.return_value = mock.Mock(status_code=401, content=b"")
         with self.assertRaises(camera.CredentialsRejectedError):
             cam.snapshot_jpeg("101")
 
-    def test_download_401_is_credentials_and_closes(self):
+    def test_download_401_is_credentials_and_closes(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         response = mock.Mock(status_code=401, headers={})
@@ -640,14 +645,14 @@ class CameraCredentialsMappingTests(unittest.TestCase):
             cam.download_stream("rtsp://x")
         response.close.assert_called_once()
 
-    def test_download_500_is_service_down(self):
+    def test_download_500_is_service_down(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         cam.session.get.return_value = mock.Mock(status_code=500, headers={})
         with self.assertRaises(camera.ServiceDownError):
             cam.download_stream("rtsp://x")
 
-    def test_download_200_returns_the_streaming_response(self):
+    def test_download_200_returns_the_streaming_response(self) -> None:
         cam = self._cam()
         cam.session = mock.Mock()
         response = mock.Mock(status_code=200, headers={})
@@ -656,23 +661,33 @@ class CameraCredentialsMappingTests(unittest.TestCase):
 
 
 class _FakeCam:
-    """Camera stand-in for motion_write: no network, records the PUT body."""
+    """Partial motion-only camera: no network, records the PUT body.
 
-    def __init__(self, base_xml, *, put_error=None, readback=None):
+    Installed at the camera seam, not a full Camera subclass: absent readback is
+    intentional in tests whose validation or rejected PUT must stop before GET.
+    """
+
+    def __init__(
+        self,
+        base_xml: str,
+        *,
+        put_error: Exception | None = None,
+        readback: camera.MotionDoc | Exception | None = None,
+    ) -> None:
         self.base_xml = base_xml
         self.put_error = put_error
         self.readback = readback
-        self.put_body = None
+        self.put_body: str | None = None
 
-    def motion_detection_xml(self):
+    def motion_detection_xml(self) -> str:
         return self.base_xml
 
-    def motion_detection(self):
+    def motion_detection(self) -> camera.MotionDoc | None:
         if isinstance(self.readback, Exception):
             raise self.readback
         return self.readback
 
-    def put_motion_detection(self, xml_text):
+    def put_motion_detection(self, xml_text: str) -> str:
         self.put_body = xml_text
         if self.put_error:
             raise self.put_error
@@ -682,28 +697,28 @@ class _FakeCam:
 class _FakeBodyHandler:
     """Minimal handler for route_motion_post: headers, request body, response sink."""
 
-    def __init__(self, headers, body=b""):
+    def __init__(self, headers: dict[str, str], body: bytes = b"") -> None:
         self.headers = headers
         self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
         self.close_connection = False
-        self.status = None
-        self.response_headers = {}
+        self.status: int | None = None
+        self.response_headers: dict[str, str] = {}
 
-    def send_response(self, code, message=None):
+    def send_response(self, code: int, message: str | None = None) -> None:
         self.status = code
 
-    def send_header(self, key, value):
+    def send_header(self, key: str, value: str) -> None:
         self.response_headers[key] = value
 
-    def end_headers(self):
+    def end_headers(self) -> None:
         pass
 
 
 class CredentialsSurfaceTests(unittest.TestCase):
     """The credentials message reaches every page that surfaces camera failures."""
 
-    def _app_with(self, **side_effects):
+    def _app_with(self, **side_effects: Exception) -> tuple[viewer_app.ViewerApp, mock.Mock]:
         cam = mock.Mock()
         for name, effect in side_effects.items():
             getattr(cam, name).side_effect = effect
@@ -711,7 +726,7 @@ class CredentialsSurfaceTests(unittest.TestCase):
         app.cam = cam
         return app, cam
 
-    def test_coverage_401_is_a_credentials_state(self):
+    def test_coverage_401_is_a_credentials_state(self) -> None:
         app, _ = self._app_with(search=camera.CredentialsRejectedError("401"))
         handler = _FakeBodyHandler({})
         app.route_coverage(handler, {"date": ["2026-10-13"]})
@@ -719,20 +734,22 @@ class CredentialsSurfaceTests(unittest.TestCase):
         self.assertEqual(payload["state"], "credentials")
         self.assertIn("credentials", payload["state_detail"])
 
-    def test_range_search_401_card_names_credentials(self):
+    def test_range_search_401_card_names_credentials(self) -> None:
         app, _ = self._app_with(search=camera.CredentialsRejectedError("401"))
-        card, code = app.run_search("2026-10-13T00:00", "2026-10-13T01:00")
+        result = app.run_search("2026-10-13T00:00", "2026-10-13T01:00")
+        assert isinstance(result, tuple)  # failures return (card, code), not success HTML
+        card, code = result
         self.assertEqual(code, 502)
         self.assertIn("refused the viewer", card)
 
-    def test_motion_read_401_is_a_credentials_state(self):
+    def test_motion_read_401_is_a_credentials_state(self) -> None:
         app, _ = self._app_with(motion_detection=camera.CredentialsRejectedError("401"))
         handler = _FakeBodyHandler({})
         app.route_motion_get(handler)
         payload = json.loads(handler.wfile.getvalue())
         self.assertEqual(payload["state"], "credentials")
 
-    def test_live_page_shows_the_credentials_warning(self):
+    def test_live_page_shows_the_credentials_warning(self) -> None:
         app, cam = self._app_with(stream_resolution=camera.CredentialsRejectedError("401"))
         cam.storage.return_value = {"free_mb": 1, "capacity_mb": 2}
         cam.device_info.return_value = {}
@@ -747,10 +764,17 @@ class MotionWriteTests(unittest.TestCase):
 
     BASE = camera.MockCamera.MOCK_MOTION_XML
 
-    def _app(self):
+    def _app(self) -> viewer_app.ViewerApp:
         return viewer_app.ViewerApp()
 
-    def _intent(self, app, *, enabled=True, sensitivity=60, grid=None):
+    def _intent(
+        self,
+        app: viewer_app.ViewerApp,
+        *,
+        enabled: bool = True,
+        sensitivity: int = 60,
+        grid: list[list[bool]] | None = None,
+    ) -> viewer_app.MotionIntent:
         return app._motion_intent(
             {
                 "enabled": enabled,
@@ -760,7 +784,7 @@ class MotionWriteTests(unittest.TestCase):
             }
         )
 
-    def _doc(self, base_xml, intended):
+    def _doc(self, base_xml: str, intended: viewer_app.MotionIntent) -> camera.MotionDoc:
         merged = camera.apply_motion_fields(
             base_xml,
             enabled=intended["enabled"],
@@ -770,91 +794,106 @@ class MotionWriteTests(unittest.TestCase):
         )
         return camera.parse_motion_detection(merged)
 
-    def test_ok_reports_readback(self):
+    def test_ok_reports_readback(self) -> None:
         app = self._app()
         intended = self._intent(app)
-        app.cam = _FakeCam(self.BASE, readback=self._doc(self.BASE, intended))
+        self.enterContext(
+            mock.patch.object(
+                app, "cam", _FakeCam(self.BASE, readback=self._doc(self.BASE, intended))
+            )
+        )
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "ok")
         self.assertTrue(result["match"])
 
-    def test_drift_reports_what_the_camera_stored(self):
+    def test_drift_reports_what_the_camera_stored(self) -> None:
         app = self._app()
         intended = self._intent(app, sensitivity=80)
         stored = self._intent(app, sensitivity=40)  # camera keeps its old level
-        app.cam = _FakeCam(self.BASE, readback=self._doc(self.BASE, stored))
+        self.enterContext(
+            mock.patch.object(
+                app, "cam", _FakeCam(self.BASE, readback=self._doc(self.BASE, stored))
+            )
+        )
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "ok")
         self.assertFalse(result["match"])
         self.assertTrue(result["differences"])
-        self.assertEqual(result["actual"]["sensitivity"], 40)
+        actual = result["actual"]
+        assert isinstance(actual, dict)  # the successful write's readback is a motion view
+        self.assertEqual(actual["sensitivity"], 40)
 
-    def test_timeout_but_readback_landed_is_ok(self):
+    def test_timeout_but_readback_landed_is_ok(self) -> None:
         app = self._app()
         intended = self._intent(app)
-        app.cam = _FakeCam(
+        fake = _FakeCam(
             self.BASE,
             put_error=camera.ServiceDownError("camera did not answer in time"),
             readback=self._doc(self.BASE, intended),
         )
+        self.enterContext(mock.patch.object(app, "cam", fake))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "ok")
         self.assertTrue(result["match"])
 
-    def test_timeout_with_different_readback_is_unobserved(self):
+    def test_timeout_with_different_readback_is_unobserved(self) -> None:
         app = self._app()
         intended = self._intent(app, sensitivity=60)
         current = camera.parse_motion_detection(self.BASE)  # unchanged camera state
-        app.cam = _FakeCam(
+        fake = _FakeCam(
             self.BASE,
             put_error=camera.ServiceDownError("camera did not answer in time"),
             readback=current,
         )
+        self.enterContext(mock.patch.object(app, "cam", fake))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "service_down")
         self.assertTrue(result["write_attempted"])
         self.assertIsNotNone(result["actual"])
 
-    def test_timeout_with_unreadable_camera_is_unobserved(self):
+    def test_timeout_with_unreadable_camera_is_unobserved(self) -> None:
         app = self._app()
         intended = self._intent(app)
-        app.cam = _FakeCam(
+        fake = _FakeCam(
             self.BASE,
             put_error=camera.ServiceDownError("camera did not answer in time"),
             readback=camera.ServiceDownError("no readback"),
         )
+        self.enterContext(mock.patch.object(app, "cam", fake))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "service_down")
         self.assertTrue(result["write_attempted"])
         self.assertIsNone(result["actual"])
 
-    def test_rejected_writes_nothing(self):
+    def test_rejected_writes_nothing(self) -> None:
         app = self._app()
         intended = self._intent(app)
-        app.cam = _FakeCam(self.BASE, put_error=camera.RejectedError("403 Invalid Operation"))
+        fake = _FakeCam(self.BASE, put_error=camera.RejectedError("403 Invalid Operation"))
+        self.enterContext(mock.patch.object(app, "cam", fake))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "rejected")
         self.assertFalse(result["write_attempted"])
 
-    def test_credentials_refused_write_saves_nothing(self):
+    def test_credentials_refused_write_saves_nothing(self) -> None:
         app = self._app()
         intended = self._intent(app)
-        app.cam = _FakeCam(self.BASE, put_error=camera.CredentialsRejectedError("401"))
+        fake = _FakeCam(self.BASE, put_error=camera.CredentialsRejectedError("401"))
+        self.enterContext(mock.patch.object(app, "cam", fake))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "credentials")
         self.assertFalse(result["write_attempted"])
 
-    def test_refuses_to_write_when_base_is_not_a_motion_document(self):
+    def test_refuses_to_write_when_base_is_not_a_motion_document(self) -> None:
         app = self._app()
         intended = self._intent(app)
         fake = _FakeCam("<html><body>login required</body></html>", readback=None)
-        app.cam = fake
+        self.enterContext(mock.patch.object(app, "cam", fake))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "bad_response")
         self.assertFalse(result["write_attempted"])
         self.assertIsNone(fake.put_body)  # the nonsensical write must never happen
 
-    def test_write_preserves_the_camera_padding_bits(self):
+    def test_write_preserves_the_camera_padding_bits(self) -> None:
         base = self.BASE.replace("ffe000" * 18, "ffffff" * 18)
         app = self._app()
         intended = self._intent(app)  # all masked -> cells zero, padding stays 3
@@ -868,7 +907,7 @@ class MotionWriteTests(unittest.TestCase):
             )
         )
         fake = _FakeCam(base, readback=stored)
-        app.cam = fake
+        self.enterContext(mock.patch.object(app, "cam", fake))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "ok")
         self.assertIsNotNone(fake.put_body)
@@ -879,24 +918,24 @@ class MotionWriteTests(unittest.TestCase):
 class MotionPostBodyTests(unittest.TestCase):
     """Non-numeric / oversized / deeply nested POST bodies get a typed 400."""
 
-    def _app(self):
+    def _app(self) -> viewer_app.ViewerApp:
         app = viewer_app.ViewerApp()
         # This mock-body test intentionally injects a partial camera fake; the
         # exercised path touches only the motion methods _FakeCam implements.
         app.cam = _FakeCam(camera.MockCamera.MOCK_MOTION_XML, readback=None)  # type: ignore[assignment]
         return app
 
-    def _handler(self, headers, body=b""):
+    def _handler(self, headers: dict[str, str], body: bytes = b"") -> _FakeBodyHandler:
         return _FakeBodyHandler(headers, body)
 
-    def _json_headers(self, length):
+    def _json_headers(self, length: int) -> dict[str, str]:
         return {
             "Host": "127.0.0.1",
             "Content-Type": "application/json",
             "Content-Length": str(length),
         }
 
-    def test_non_numeric_content_length_is_typed_400(self):
+    def test_non_numeric_content_length_is_typed_400(self) -> None:
         handler = self._handler(
             {"Host": "127.0.0.1", "Content-Type": "application/json", "Content-Length": "abc"}
         )
@@ -904,13 +943,13 @@ class MotionPostBodyTests(unittest.TestCase):
         self.assertEqual(handler.status, 400)
         self.assertIn(b"bad_request", handler.wfile.getvalue())
 
-    def test_oversized_body_closes_and_answers_400(self):
+    def test_oversized_body_closes_and_answers_400(self) -> None:
         handler = self._handler(self._json_headers(2_000_000))
         self._app().route_motion_post(handler)
         self.assertEqual(handler.status, 400)
         self.assertTrue(handler.close_connection)
 
-    def test_deeply_nested_json_is_typed_400(self):
+    def test_deeply_nested_json_is_typed_400(self) -> None:
         raw = ("[" * 3000 + "]" * 3000).encode()
         handler = self._handler(self._json_headers(len(raw)), raw)
         self._app().route_motion_post(handler)
@@ -921,7 +960,7 @@ class MotionPostBodyTests(unittest.TestCase):
 class WindowEligibilityTests(unittest.TestCase):
     """Pure geometry behind the restart bar: clipping, gaps, snapping, offsets."""
 
-    def _file(self, start, end, name="f"):
+    def _file(self, start: int, end: int, name: str = "f") -> coverage.FileRecord:
         return {
             "start_epoch": start,
             "end_epoch": end,
@@ -932,11 +971,11 @@ class WindowEligibilityTests(unittest.TestCase):
             "end_local": "",
         }
 
-    def test_clip_to_window_merges_adjacent_files(self):
+    def test_clip_to_window_merges_adjacent_files(self) -> None:
         files = [self._file(0, 100), self._file(100, 200), self._file(400, 500)]
         self.assertEqual(coverage.clip_to_window(files, 50, 450), [(50, 200), (400, 450)])
 
-    def test_window_eligibility_reports_segments_and_gaps(self):
+    def test_window_eligibility_reports_segments_and_gaps(self) -> None:
         files = [self._file(0, 100), self._file(200, 300)]
         out = coverage.window_eligibility(files, 50, 250)
         self.assertEqual(
@@ -947,14 +986,14 @@ class WindowEligibilityTests(unittest.TestCase):
         self.assertTrue(out["has_eligible"])
         self.assertEqual(out["covered_s"], 100)
 
-    def test_epoch_pct_maps_and_clamps_to_the_window(self):
+    def test_epoch_pct_maps_and_clamps_to_the_window(self) -> None:
         self.assertEqual(coverage.epoch_pct(0, 0, 100), 0.0)
         self.assertEqual(coverage.epoch_pct(50, 0, 100), 50.0)
         self.assertEqual(coverage.epoch_pct(100, 0, 100), 100.0)
         self.assertEqual(coverage.epoch_pct(-10, 0, 100), 0.0)
         self.assertEqual(coverage.epoch_pct(999, 0, 100), 100.0)
 
-    def test_nearest_epoch_snaps_out_of_a_gap(self):
+    def test_nearest_epoch_snaps_out_of_a_gap(self) -> None:
         segments = [(50, 100), (200, 250)]
         self.assertEqual(coverage.nearest_epoch(segments, 160, 50, 250), 200)
         self.assertEqual(coverage.nearest_epoch(segments, 140, 50, 250), 100)
@@ -962,18 +1001,18 @@ class WindowEligibilityTests(unittest.TestCase):
         self.assertEqual(coverage.nearest_epoch(segments, 249, 50, 250), 249)
         self.assertIsNone(coverage.nearest_epoch([], 150, 50, 250))
 
-    def test_no_eligibility_is_a_real_state_not_an_error(self):
+    def test_no_eligibility_is_a_real_state_not_an_error(self) -> None:
         out = coverage.window_eligibility([self._file(1000, 1100)], 50, 250)
         self.assertEqual(out["segments"], [])
         self.assertFalse(out["has_eligible"])
         self.assertEqual(out["gaps"], [{"start_epoch": 50, "end_epoch": 250}])
         self.assertEqual(out["target_epoch"], 50)  # falls back to the window start
 
-    def test_target_epoch_points_at_nearest_recording(self):
+    def test_target_epoch_points_at_nearest_recording(self) -> None:
         out = coverage.window_eligibility([self._file(200, 300)], 50, 350)
         self.assertEqual(out["target_epoch"], 200)
 
-    def test_target_epoch_can_differ_from_the_window_start(self):
+    def test_target_epoch_can_differ_from_the_window_start(self) -> None:
         # A restart moved the session start to 220 while the window still begins
         # at 50; the preview must snap toward the session, not the window start.
         files = [self._file(50, 150), self._file(200, 300)]
@@ -984,35 +1023,35 @@ class WindowEligibilityTests(unittest.TestCase):
         # Without an explicit target the window start is snapped (first arrival).
         self.assertEqual(coverage.window_eligibility(files, 50, 300)["target_epoch"], 50)
 
-    def test_target_epoch_snaps_out_of_a_gap_toward_the_session(self):
+    def test_target_epoch_snaps_out_of_a_gap_toward_the_session(self) -> None:
         files = [self._file(50, 150), self._file(200, 300)]
         out = coverage.window_eligibility(files, 50, 300, target_epoch=180)
         self.assertEqual(out["target_epoch"], 200)
 
-    def test_clip_to_window_inverted_window_is_empty(self):
+    def test_clip_to_window_inverted_window_is_empty(self) -> None:
         # from > to is invalid input; it must not fabricate coverage.
         files = [self._file(0, 100), self._file(100, 200)]
         self.assertEqual(coverage.clip_to_window(files, 450, 50), [])
 
-    def test_window_eligibility_inverted_window_has_no_eligibility(self):
+    def test_window_eligibility_inverted_window_has_no_eligibility(self) -> None:
         out = coverage.window_eligibility([self._file(0, 100)], 450, 50)
         self.assertEqual(out["segments"], [])
         self.assertFalse(out["has_eligible"])
         self.assertEqual(out["gaps"], [])
         self.assertEqual(out["covered_s"], 0)
 
-    def test_window_eligibility_zero_width_window(self):
+    def test_window_eligibility_zero_width_window(self) -> None:
         out = coverage.window_eligibility([self._file(0, 100)], 50, 50)
         self.assertEqual(out["segments"], [])
         self.assertFalse(out["has_eligible"])
         self.assertEqual(out["covered_s"], 0)
 
-    def test_nearest_epoch_tie_prefers_the_earlier_segment(self):
+    def test_nearest_epoch_tie_prefers_the_earlier_segment(self) -> None:
         # 15 is equidistant from 10 and 20; the earlier segment wins the tie.
         segments = [(0, 10), (20, 30)]
         self.assertEqual(coverage.nearest_epoch(segments, 15, 0, 30), 10)
 
-    def test_merge_spans_collapses_nested_and_touching(self):
+    def test_merge_spans_collapses_nested_and_touching(self) -> None:
         spans = [(0, 100), (20, 30), (40, 50), (100, 120), (130, 140)]
         self.assertEqual(coverage._merge_spans(spans), [(0, 120), (130, 140)])
         self.assertEqual(coverage._merge_spans([]), [])
@@ -1021,7 +1060,7 @@ class WindowEligibilityTests(unittest.TestCase):
 class NeighboursApiTests(unittest.TestCase):
     """route_neighbours exposes the restart bar's window without dropping fields."""
 
-    def _clip(self, start_cam, end_cam):
+    def _clip(self, start_cam: str, end_cam: str) -> camera.Clip:
         return camera.Clip(
             uri="rtsp://x",
             uri_escaped="rtsp://x",
@@ -1032,7 +1071,7 @@ class NeighboursApiTests(unittest.TestCase):
             duration_s=0,
         )
 
-    def test_window_payload_and_existing_fields(self):
+    def test_window_payload_and_existing_fields(self) -> None:
         day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
         clip = self._clip(
             util.to_cam_time(day.replace(hour=8, minute=1).astimezone(timezone.utc)),
@@ -1065,7 +1104,7 @@ class NeighboursApiTests(unittest.TestCase):
         self.assertEqual(window["segments"][0]["end_pct"], 100.0)
         self.assertTrue(window["has_eligible"])
 
-    def test_win_widens_the_coverage_window_but_not_neighbours(self):
+    def test_win_widens_the_coverage_window_but_not_neighbours(self) -> None:
         day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
         early = self._clip(
             util.to_cam_time(day.replace(hour=8, minute=0).astimezone(timezone.utc)),
@@ -1101,7 +1140,7 @@ class NeighboursApiTests(unittest.TestCase):
         # The preview target follows the session start, not the window start.
         self.assertEqual(window["target_epoch"], from_epoch)
 
-    def test_unknown_search_state_omits_window(self):
+    def test_unknown_search_state_omits_window(self) -> None:
         cam = mock.Mock()
         cam.search.side_effect = camera.ServiceDownError("down")
         app = viewer_app.ViewerApp()
@@ -1116,7 +1155,7 @@ class NeighboursApiTests(unittest.TestCase):
         self.assertEqual(payload["state"], "service_down")
         self.assertNotIn("window", payload)
 
-    def test_truncated_search_omits_window_but_keeps_neighbours(self):
+    def test_truncated_search_omits_window_but_keeps_neighbours(self) -> None:
         day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
         clip = self._clip(
             util.to_cam_time(day.replace(hour=1).astimezone(timezone.utc)),
@@ -1142,20 +1181,20 @@ class NeighboursApiTests(unittest.TestCase):
 class PlayPageTests(unittest.TestCase):
     """page_play keeps the session start and the original window start separate."""
 
-    def _render(self, query):
+    def _render(self, query: dict[str, list[str]]) -> str:
         app = viewer_app.ViewerApp()
         app.cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
         handler = _FakeBodyHandler({})
         app.page_play(handler, query)
         return handler.wfile.getvalue().decode()
 
-    def test_window_defaults_to_the_session_start(self):
+    def test_window_defaults_to_the_session_start(self) -> None:
         html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
         from_epoch = int(util.parse_cam_time("20261012T190000Z").timestamp())
         self.assertIn(f'data-from-epoch="{from_epoch}"', html)
         self.assertIn(f'data-window-from-epoch="{from_epoch}"', html)
 
-    def test_window_param_preserves_the_original_window(self):
+    def test_window_param_preserves_the_original_window(self) -> None:
         html = self._render(
             {
                 "from": ["20261012T191200Z"],
@@ -1168,7 +1207,7 @@ class PlayPageTests(unittest.TestCase):
         self.assertIn(f'data-from-epoch="{from_epoch}"', html)
         self.assertIn(f'data-window-from-epoch="{win_epoch}"', html)
 
-    def test_window_after_the_session_is_clamped_back(self):
+    def test_window_after_the_session_is_clamped_back(self) -> None:
         html = self._render(
             {
                 "from": ["20261012T191200Z"],
@@ -1179,19 +1218,19 @@ class PlayPageTests(unittest.TestCase):
         from_epoch = int(util.parse_cam_time("20261012T191200Z").timestamp())
         self.assertIn(f'data-window-from-epoch="{from_epoch}"', html)
 
-    def test_caveat_names_the_previous_start_time(self):
+    def test_caveat_names_the_previous_start_time(self) -> None:
         html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
         self.assertIn("previous start time", html)
         self.assertNotIn("previous position", html)
 
-    def test_results_link_returns_to_the_clip_day_and_hour(self):
+    def test_results_link_returns_to_the_clip_day_and_hour(self) -> None:
         html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
         local = util.parse_cam_time("20261012T190000Z").astimezone()
         # The href is HTML-escaped (& -> &amp;) in the attribute.
         expected = f'href="/recordings?date={local.strftime("%Y-%m-%d")}&amp;hour={local.hour}"'
         self.assertIn(expected, html)
 
-    def test_download_link_uses_the_clip_window_and_size(self):
+    def test_download_link_uses_the_clip_window_and_size(self) -> None:
         html = self._render(
             {
                 "from": ["20261012T191200Z"],
@@ -1207,14 +1246,14 @@ class PlayPageTests(unittest.TestCase):
             html,
         )
 
-    def test_download_link_defaults_to_the_session_window(self):
+    def test_download_link_defaults_to_the_session_window(self) -> None:
         html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
         self.assertIn(
             'href="/download?from=20261012T190000Z&amp;to=20261012T192000Z"',
             html,
         )
 
-    def test_download_label_is_honest_about_the_whole_file(self):
+    def test_download_label_is_honest_about_the_whole_file(self) -> None:
         html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
         self.assertIn("Download original recording", html)
         # It is the camera's whole stored file, not an export trimmed to the clip.
@@ -1224,47 +1263,47 @@ class PlayPageTests(unittest.TestCase):
 class DownloadSniffTests(unittest.TestCase):
     """The download's type and extension come from the bytes, not a guess."""
 
-    def test_mpeg_program_stream(self):
+    def test_mpeg_program_stream(self) -> None:
         data = b"\x00\x00\x01\xba" + b"\x00" * 20
         self.assertEqual(viewer_app.sniff_download_container(data), ("video/mpeg", "mpg"))
 
-    def test_iso_base_media_ftyp_box(self):
+    def test_iso_base_media_ftyp_box(self) -> None:
         data = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16
         self.assertEqual(viewer_app.sniff_download_container(data), ("video/mp4", "mp4"))
 
-    def test_mpeg_transport_stream(self):
+    def test_mpeg_transport_stream(self) -> None:
         ts = bytearray(200)
         ts[0] = 0x47
         ts[188] = 0x47
         self.assertEqual(viewer_app.sniff_download_container(bytes(ts)), ("video/mp2t", "ts"))
 
-    def test_hikvision_imkh_header_wrapped_mpeg_program_stream(self):
+    def test_hikvision_imkh_header_wrapped_mpeg_program_stream(self) -> None:
         # Measured on the device: a 40-byte "IMKH" header, then the MPEG-PS pack
         # start, and ffprobe reads the whole file as mpeg. Without this the stream
         # falls back to .bin, hiding a playable video.
         data = b"IMKH" + b"\x00" * 36 + b"\x00\x00\x01\xba" + b"\x00" * 20
         self.assertEqual(viewer_app.sniff_download_container(data), ("video/mpeg", "mpg"))
 
-    def test_imkh_magic_alone_is_not_evidence_of_mpeg(self):
+    def test_imkh_magic_alone_is_not_evidence_of_mpeg(self) -> None:
         data = b"IMKH" + b"\x00" * 400
         self.assertEqual(
             viewer_app.sniff_download_container(data), ("application/octet-stream", "bin")
         )
 
-    def test_lone_sync_byte_is_not_enough_to_claim_transport_stream(self):
+    def test_lone_sync_byte_is_not_enough_to_claim_transport_stream(self) -> None:
         # A TS packet is 188 bytes; a single 0x47 is coincidence, not evidence.
         data = b"\x47" + b"\x00" * 20
         self.assertEqual(
             viewer_app.sniff_download_container(data), ("application/octet-stream", "bin")
         )
 
-    def test_unknown_bytes_stay_opaque(self):
+    def test_unknown_bytes_stay_opaque(self) -> None:
         data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
         self.assertEqual(
             viewer_app.sniff_download_container(data), ("application/octet-stream", "bin")
         )
 
-    def test_empty_body_stays_opaque(self):
+    def test_empty_body_stays_opaque(self) -> None:
         self.assertEqual(
             viewer_app.sniff_download_container(b""), ("application/octet-stream", "bin")
         )
@@ -1274,45 +1313,49 @@ class DownloadRouteTests(unittest.TestCase):
     """route_download relays the camera stream and stays typed on failure."""
 
     class _FakeDownload:
-        """requests-style streaming response stand-in (no camera, no network)."""
+        """Partial response for the relay's iter_content/close seam, with no I/O.
 
-        def __init__(self, chunks, content_type="video/mp4"):
+        Patch download_stream for each test rather than claim this implements
+        requests.Response's unused connection/decoding machinery.
+        """
+
+        def __init__(self, chunks: list[bytes], content_type: str = "video/mp4") -> None:
             self.status_code = 200
             self.headers = {"Content-Type": content_type}
             self._chunks = chunks
             self.closed = False
-            self.chunk_size = None
+            self.chunk_size: int | None = None
 
-        def iter_content(self, chunk_size):
+        def iter_content(self, chunk_size: int) -> Iterator[bytes]:
             self.chunk_size = chunk_size
             yield from self._chunks
 
-        def close(self):
+        def close(self) -> None:
             self.closed = True
 
     WINDOW = {"from": ["20261012T194808Z"], "to": ["20261012T201036Z"]}
 
-    def _app(self):
+    def _app(self) -> viewer_app.ViewerApp:
         app = viewer_app.ViewerApp()
         app.cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
         return app
 
-    def test_bad_clip_parameters_are_a_typed_400(self):
+    def test_bad_clip_parameters_are_a_typed_400(self) -> None:
         handler = _FakeBodyHandler({})
         self._app().route_download(handler, {"from": ["nope"], "to": ["nope"]})
         self.assertEqual(handler.status, 400)
         self.assertIn(b"Bad clip parameters", handler.wfile.getvalue())
 
-    def test_relays_the_camera_stream_with_download_headers(self):
+    def test_relays_the_camera_stream_with_download_headers(self) -> None:
         app = self._app()
         fake = self._FakeDownload([b"\x00\x00\x00\x18ftypmp42", b"", b"cdef"])
-        captured = {}
+        captured: dict[str, str] = {}
 
-        def fake_download(uri_escaped):
+        def fake_download(uri_escaped: str) -> DownloadRouteTests._FakeDownload:
             captured["uri"] = uri_escaped
             return fake
 
-        app.cam.download_stream = fake_download
+        self.enterContext(mock.patch.object(app.cam, "download_stream", fake_download))
         handler = _FakeBodyHandler({})
         app.route_download(
             handler,
@@ -1338,28 +1381,28 @@ class DownloadRouteTests(unittest.TestCase):
         )
         self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
 
-    def test_download_body_uses_the_configured_rtsp_scheme(self):
+    def test_download_body_uses_the_configured_rtsp_scheme(self) -> None:
         # With TLS on, the ISAPI playback body must carry rtsps, not rtsp.
         app = self._app()
-        captured = {}
+        captured: dict[str, str] = {}
 
-        def fake_download(uri):
+        def fake_download(uri: str) -> DownloadRouteTests._FakeDownload:
             captured["uri"] = uri
             return self._FakeDownload([b"\x00\x00\x00\x18ftypmp42"])
 
-        app.cam.download_stream = fake_download
+        self.enterContext(mock.patch.object(app.cam, "download_stream", fake_download))
         with mock.patch.object(config, "RTSP_SCHEME", "rtsps"):
             app.route_download(_FakeBodyHandler({}), self.WINDOW)
         self.assertTrue(captured["uri"].startswith("rtsps://"))
         self.assertIn("/Streaming/tracks/101/", captured["uri"])
 
-    def test_single_chunk_body_is_relayed_intact(self):
+    def test_single_chunk_body_is_relayed_intact(self) -> None:
         # The first chunk is read early to sniff the container, so it must still
         # be written exactly once: not dropped and not duplicated.
         app = self._app()
         body = b"\x00\x00\x00\x18ftypmp42" + bytes(range(256))
         fake = self._FakeDownload([body])
-        app.cam.download_stream = lambda uri: fake
+        self.enterContext(mock.patch.object(app.cam, "download_stream", lambda uri: fake))
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 200)
@@ -1369,12 +1412,14 @@ class DownloadRouteTests(unittest.TestCase):
             'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
         )
 
-    def test_mpeg_program_stream_download_is_named_mpg(self):
+    def test_mpeg_program_stream_download_is_named_mpg(self) -> None:
         # The extension and type follow the sniffed container, not a hard-coded
         # .mp4 -- the real device serves MPEG-PS here.
         app = self._app()
         body = b"\x00\x00\x01\xba" + bytes(range(256))
-        app.cam.download_stream = lambda uri: self._FakeDownload([body])
+        self.enterContext(
+            mock.patch.object(app.cam, "download_stream", lambda uri: self._FakeDownload([body]))
+        )
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.wfile.getvalue(), body)
@@ -1384,24 +1429,28 @@ class DownloadRouteTests(unittest.TestCase):
             'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mpg"',
         )
 
-    def test_unsafe_name_is_dropped_not_embedded(self):
+    def test_unsafe_name_is_dropped_not_embedded(self) -> None:
         app = self._app()
-        captured = {}
+        captured: dict[str, str] = {}
 
-        def fake_download(uri):
+        def fake_download(uri: str) -> DownloadRouteTests._FakeDownload:
             captured["uri"] = uri
             return self._FakeDownload([])
 
-        app.cam.download_stream = fake_download
+        self.enterContext(mock.patch.object(app.cam, "download_stream", fake_download))
         # A name the camera could never report must never reach the XML body.
         handler = _FakeBodyHandler({})
         app.route_download(handler, {**self.WINDOW, "name": ["x</playbackURI><y>"]})
         self.assertNotIn("</playbackURI>", captured["uri"])
         self.assertNotIn("name=", captured["uri"])
 
-    def test_refused_credentials_render_the_credentials_card(self):
+    def test_refused_credentials_render_the_credentials_card(self) -> None:
         app = self._app()
-        app.cam.download_stream = mock.Mock(side_effect=camera.CredentialsRejectedError("401"))
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.CredentialsRejectedError("401")
+            )
+        )
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 502)
@@ -1409,55 +1458,59 @@ class DownloadRouteTests(unittest.TestCase):
         self.assertIn("refused the viewer", body)
         self.assertNotIn("Traceback", body)
 
-    def test_service_down_offers_a_retry(self):
+    def test_service_down_offers_a_retry(self) -> None:
         app = self._app()
-        app.cam.download_stream = mock.Mock(side_effect=camera.ServiceDownError("boom"))
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("boom")
+            )
+        )
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 503)
         self.assertIn("/download?from=20261012T194808Z", handler.wfile.getvalue().decode())
 
-    def test_client_going_away_mid_stream_is_quiet(self):
+    def test_client_going_away_mid_stream_is_quiet(self) -> None:
         app = self._app()
 
         class _BrokenStream(DownloadRouteTests._FakeDownload):
-            def iter_content(self, chunk_size):
+            def iter_content(self, chunk_size: int) -> Iterator[bytes]:
                 yield b"first"
                 raise BrokenPipeError("client gone")
 
         fake = _BrokenStream([])
-        app.cam.download_stream = lambda uri: fake
+        self.enterContext(mock.patch.object(app.cam, "download_stream", lambda uri: fake))
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertTrue(fake.closed)
 
-    def test_mock_encoder_failure_raises_a_typed_error_with_stderr(self):
+    def test_mock_encoder_failure_raises_a_typed_error_with_stderr(self) -> None:
         # A failed encoder is a failed reply, not an empty file: the generator
         # names ffmpeg's stderr instead of silently yielding nothing.
         failed = subprocess.CompletedProcess([], 1, b"", b"boom: no such filter")
-        with mock.patch.object(streams.subprocess, "run", return_value=failed):
+        with mock.patch("viewer.streams.subprocess.run", return_value=failed):
             with self.assertRaises(camera.BadResponseError) as ctx:
                 list(streams.MockDownloadResponse().iter_content(viewer_app.DOWNLOAD_CHUNK))
         self.assertIn("boom: no such filter", str(ctx.exception))
 
-    def test_mock_snapshot_encoder_failure_raises_a_typed_error(self):
+    def test_mock_snapshot_encoder_failure_raises_a_typed_error(self) -> None:
         # Same rule as the download, and the reason it matters: route_snapshot
         # only catches camera.CameraError, so a bare RuntimeError escaped as an
         # unhandled 500 instead of the typed card the other failures get.
         failed = subprocess.CompletedProcess([], 1, b"", b"snapshot boom")
-        with mock.patch.object(streams.subprocess, "run", return_value=failed):
+        with mock.patch("viewer.streams.subprocess.run", return_value=failed):
             with self.assertRaises(camera.BadResponseError) as ctx:
                 streams.mock_snapshot_jpeg()
         self.assertIn("snapshot boom", str(ctx.exception))
 
-    def test_failed_mock_encoder_is_a_typed_error_not_an_empty_200(self):
+    def test_failed_mock_encoder_is_a_typed_error_not_an_empty_200(self) -> None:
         # Drive the real mock response through the route: the download must not
         # answer 200 with a 0-byte attachment, and the stderr must reach the card.
         app = self._app()
         failed = subprocess.CompletedProcess([], 1, b"", b"forced mock encoder failure")
         with (
             mock.patch.object(config, "MOCK", True),
-            mock.patch.object(streams.subprocess, "run", return_value=failed),
+            mock.patch("viewer.streams.subprocess.run", return_value=failed),
         ):
             handler = _FakeBodyHandler({})
             app.route_download(handler, self.WINDOW)
@@ -1467,14 +1520,14 @@ class DownloadRouteTests(unittest.TestCase):
         self.assertIn("forced mock encoder failure", body)
         self.assertIn("/download?from=20261012T194808Z", body)  # Retry affordance
 
-    def test_successful_mock_generation_still_relays_bytes(self):
+    def test_successful_mock_generation_still_relays_bytes(self) -> None:
         # The happy path must survive the failure guard: bytes in, same bytes out.
         app = self._app()
         body = b"\x00\x00\x00\x18ftypmp42" + bytes(range(64))
         ok = subprocess.CompletedProcess([], 0, body, b"")
         with (
             mock.patch.object(config, "MOCK", True),
-            mock.patch.object(streams.subprocess, "run", return_value=ok),
+            mock.patch("viewer.streams.subprocess.run", return_value=ok),
         ):
             handler = _FakeBodyHandler({})
             app.route_download(handler, self.WINDOW)
@@ -1486,11 +1539,13 @@ class DownloadRouteTests(unittest.TestCase):
             'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
         )
 
-    def test_empty_camera_reply_is_a_typed_error_not_an_empty_200(self):
+    def test_empty_camera_reply_is_a_typed_error_not_an_empty_200(self) -> None:
         # A real camera that answers 200 with no bytes is a bad reply, not a
         # successful empty download. It must be typed and offer a Retry.
         app = self._app()
-        app.cam.download_stream = lambda uri: self._FakeDownload([])
+        self.enterContext(
+            mock.patch.object(app.cam, "download_stream", lambda uri: self._FakeDownload([]))
+        )
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 502)
@@ -1502,13 +1557,13 @@ class DownloadRouteTests(unittest.TestCase):
 class ConfigFileTests(unittest.TestCase):
     """VIEWER_CONFIG: strict loading, HIK_* fallback, and TLS scheme selection."""
 
-    def _write(self, payload) -> str:
+    def _write(self, payload: object) -> str:
         path = Path(tempfile.mkdtemp()) / "camera.json"
         path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
         return str(path)
 
     # ── loading and validation ───────────────────────────────────────
-    def test_loads_the_camera_fields_the_file_sets(self):
+    def test_loads_the_camera_fields_the_file_sets(self) -> None:
         path = self._write(
             {
                 "camera": {
@@ -1537,21 +1592,21 @@ class ConfigFileTests(unittest.TestCase):
             },
         )
 
-    def test_missing_file_names_the_path(self):
+    def test_missing_file_names_the_path(self) -> None:
         path = "/nonexistent/definitely/camera.json"
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn(path, str(ctx.exception))
         self.assertIn("cannot read", str(ctx.exception))
 
-    def test_malformed_json_names_the_path(self):
+    def test_malformed_json_names_the_path(self) -> None:
         path = self._write("{not json")
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn(path, str(ctx.exception))
         self.assertIn("not valid JSON", str(ctx.exception))
 
-    def test_a_non_utf8_file_is_refused_cleanly(self):
+    def test_a_non_utf8_file_is_refused_cleanly(self) -> None:
         path = Path(tempfile.mkdtemp()) / "camera.json"
         path.write_bytes(b'{"camera": {"host": "\xff\xfe"}}')
         with self.assertRaises(config_file.ConfigFileError) as ctx:
@@ -1559,30 +1614,30 @@ class ConfigFileTests(unittest.TestCase):
         self.assertIn(str(path), str(ctx.exception))
         self.assertIn("UTF-8", str(ctx.exception))
 
-    def test_a_bom_ed_file_still_loads(self):
+    def test_a_bom_ed_file_still_loads(self) -> None:
         # A Windows editor save: UTF-8 BOM + valid JSON, not a decode error.
         path = Path(tempfile.mkdtemp()) / "camera.json"
         path.write_bytes(b"\xef\xbb\xbf" + b'{"camera": {"host": "bomcam"}}')
         self.assertEqual(config_file.load(str(path)), {"host": "bomcam"})
 
-    def test_a_duplicate_key_is_refused_and_named(self):
+    def test_a_duplicate_key_is_refused_and_named(self) -> None:
         path = self._write('{"camera": {"host": "a", "host": "b"}}')
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn("host", str(ctx.exception))
         self.assertIn("repeat", str(ctx.exception).lower())
 
-    def test_surrounding_whitespace_on_host_is_stripped(self):
+    def test_surrounding_whitespace_on_host_is_stripped(self) -> None:
         path = self._write({"camera": {"host": " 10.0.0.1 "}})
         self.assertEqual(config_file.load(path), {"host": "10.0.0.1"})
 
-    def test_embedded_whitespace_in_host_is_refused(self):
+    def test_embedded_whitespace_in_host_is_refused(self) -> None:
         path = self._write({"camera": {"host": "10.0.0 .1"}})
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn("whitespace", str(ctx.exception))
 
-    def test_a_host_scheme_or_path_is_refused(self):
+    def test_a_host_scheme_or_path_is_refused(self) -> None:
         for host in ("http://10.0.0.1", "https://cam.lan", "10.0.0.1/x"):
             with self.subTest(host=host):
                 path = self._write({"camera": {"host": host}})
@@ -1590,70 +1645,70 @@ class ConfigFileTests(unittest.TestCase):
                     config_file.load(path)
                 self.assertIn("scheme", str(ctx.exception))
 
-    def test_a_non_object_top_level_is_refused(self):
+    def test_a_non_object_top_level_is_refused(self) -> None:
         path = self._write([{"host": "cam"}])
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn("must contain a JSON object", str(ctx.exception))
 
-    def test_unknown_camera_key_is_named(self):
+    def test_unknown_camera_key_is_named(self) -> None:
         path = self._write({"camera": {"usr": "admin"}})
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn('"usr"', str(ctx.exception))
 
-    def test_unknown_top_level_key_is_named(self):
+    def test_unknown_top_level_key_is_named(self) -> None:
         path = self._write({"camera": {}, "cam": {}})
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn('"cam"', str(ctx.exception))
 
-    def test_a_two_entry_cameras_array_is_refused(self):
+    def test_a_two_entry_cameras_array_is_refused(self) -> None:
         path = self._write({"cameras": [{"host": "a"}, {"host": "b"}]})
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn("one camera per instance", str(ctx.exception))
 
-    def test_a_one_entry_cameras_array_is_accepted(self):
+    def test_a_one_entry_cameras_array_is_accepted(self) -> None:
         path = self._write({"cameras": [{"host": "solo"}]})
         self.assertEqual(config_file.load(path), {"host": "solo"})
 
-    def test_empty_host_is_refused(self):
+    def test_empty_host_is_refused(self) -> None:
         path = self._write({"camera": {"host": "   "}})
         with self.assertRaises(config_file.ConfigFileError):
             config_file.load(path)
 
-    def test_a_string_port_is_refused(self):
+    def test_a_string_port_is_refused(self) -> None:
         path = self._write({"camera": {"http_port": "80"}})
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn("http_port", str(ctx.exception))
 
-    def test_a_port_out_of_range_is_refused(self):
+    def test_a_port_out_of_range_is_refused(self) -> None:
         path = self._write({"camera": {"rtsp_port": 70000}})
         with self.assertRaises(config_file.ConfigFileError):
             config_file.load(path)
 
-    def test_a_boolean_port_is_not_an_integer_port(self):
+    def test_a_boolean_port_is_not_an_integer_port(self) -> None:
         # bool is an int subclass in Python; JSON true must not become port 1.
         path = self._write({"camera": {"http_port": True}})
         with self.assertRaises(config_file.ConfigFileError):
             config_file.load(path)
 
-    def test_a_non_boolean_tls_is_refused(self):
+    def test_a_non_boolean_tls_is_refused(self) -> None:
         path = self._write({"camera": {"tls": "true"}})
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn("tls", str(ctx.exception))
 
-    def test_a_non_boolean_rtsp_tls_is_refused(self):
+    def test_a_non_boolean_rtsp_tls_is_refused(self) -> None:
         path = self._write({"camera": {"rtsp_tls": "true"}})
         with self.assertRaises(config_file.ConfigFileError) as ctx:
             config_file.load(path)
         self.assertIn("rtsp_tls", str(ctx.exception))
 
     # ── precedence (file over HIK_*) ─────────────────────────────────
-    def test_omitted_fields_fall_back_to_the_environment(self):
+    def test_omitted_fields_fall_back_to_the_environment(self) -> None:
         settings, notes = config_file.resolve_camera(
             {"HIK_HOST": "envcam", "HIK_RTSP_PORT": "8554"},
             {"user": "fileuser"},
@@ -1663,7 +1718,7 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(settings.user, "fileuser")
         self.assertEqual(notes, [])
 
-    def test_file_wins_over_a_disagreeing_environment_and_says_so(self):
+    def test_file_wins_over_a_disagreeing_environment_and_says_so(self) -> None:
         settings, notes = config_file.resolve_camera(
             {"HIK_HOST": "envcam"},
             {"host": "filecam"},
@@ -1674,14 +1729,14 @@ class ConfigFileTests(unittest.TestCase):
         self.assertIn("HIK_HOST", notes[0])
         self.assertIn("filecam", notes[0])
 
-    def test_agreeing_values_produce_no_note(self):
+    def test_agreeing_values_produce_no_note(self) -> None:
         _, notes = config_file.resolve_camera(
             {"HIK_HOST": "same"},
             {"host": "same"},
         )
         self.assertEqual(notes, [])
 
-    def test_a_password_mismatch_never_prints_the_password(self):
+    def test_a_password_mismatch_never_prints_the_password(self) -> None:
         settings, notes = config_file.resolve_camera(
             {"HIK_PASSWORD": "env-secret"},
             {"password": "file-secret"},
@@ -1692,7 +1747,7 @@ class ConfigFileTests(unittest.TestCase):
         self.assertNotIn("file-secret", notes[0])
         self.assertNotIn("env-secret", notes[0])
 
-    def test_defaults_are_untouched_when_no_file_is_used(self):
+    def test_defaults_are_untouched_when_no_file_is_used(self) -> None:
         settings, notes = config_file.resolve_camera({}, {})
         self.assertEqual(settings.host, config_file.DEFAULT_HOST)
         self.assertEqual(settings.user, config_file.DEFAULT_USER)
@@ -1703,7 +1758,7 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(notes, [])
 
     # ── TLS scheme selection ─────────────────────────────────────────
-    def test_tls_builds_https_and_rtsps_urls(self):
+    def test_tls_builds_https_and_rtsps_urls(self) -> None:
         settings, notes = config_file.resolve_camera(
             {"HIK_HOST": "cam.lan"},
             {"tls": True, "tls_verify": False, "http_port": 443, "rtsp_port": 322},
@@ -1712,12 +1767,12 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(config_file.rtsp_base(settings), "rtsps://cam.lan:322")
         self.assertIn("verification is off", notes[0])
 
-    def test_non_tls_builds_todays_urls(self):
+    def test_non_tls_builds_todays_urls(self) -> None:
         settings, _ = config_file.resolve_camera({}, {})
         self.assertEqual(config_file.isapi_base(settings), "http://192.168.0.156:80")
         self.assertEqual(config_file.rtsp_base(settings), "rtsp://192.168.0.156:554")
 
-    def test_tls_verify_toggles_verification(self):
+    def test_tls_verify_toggles_verification(self) -> None:
         on, _ = config_file.resolve_camera({}, {"tls": True, "tls_verify": True})
         off, _ = config_file.resolve_camera({}, {"tls": True, "tls_verify": False})
         default, _ = config_file.resolve_camera({}, {"tls": True})
@@ -1726,7 +1781,7 @@ class ConfigFileTests(unittest.TestCase):
         self.assertFalse(default.tls_verify)  # documented default
 
     # ── independent rtsp_tls ────────────────────────────────────────
-    def test_rtsp_tls_defaults_to_tls(self):
+    def test_rtsp_tls_defaults_to_tls(self) -> None:
         # Omitting rtsp_tls must behave exactly like the old single flag: both
         # services follow tls, so every pre-existing file is unchanged.
         omitted, _ = config_file.resolve_camera({}, {"tls": True})
@@ -1738,7 +1793,7 @@ class ConfigFileTests(unittest.TestCase):
         self.assertFalse(off.rtsp_tls)
         self.assertEqual(config_file.rtsp_base(off), "rtsp://192.168.0.156:554")
 
-    def test_https_isapi_pairs_with_plain_rtsp(self):
+    def test_https_isapi_pairs_with_plain_rtsp(self) -> None:
         # This camera serves HTTPS on 443 but no RTSPS: the useful combination.
         settings, _ = config_file.resolve_camera(
             {},
@@ -1747,7 +1802,7 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(config_file.isapi_base(settings), "https://192.168.0.156:443")
         self.assertEqual(config_file.rtsp_base(settings), "rtsp://192.168.0.156:554")
 
-    def test_plain_isapi_pairs_with_rtsps(self):
+    def test_plain_isapi_pairs_with_rtsps(self) -> None:
         settings, _ = config_file.resolve_camera(
             {},
             {"tls": False, "rtsp_tls": True, "http_port": 80, "rtsp_port": 322},
@@ -1755,11 +1810,27 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(config_file.isapi_base(settings), "http://192.168.0.156:80")
         self.assertEqual(config_file.rtsp_base(settings), "rtsps://192.168.0.156:322")
 
-    def test_rtsp_tls_alone_warns_when_verification_is_off(self):
+    def test_rtsp_tls_alone_warns_when_verification_is_off(self) -> None:
         # TLS on either service with verification off is worth a startup note.
         _, notes = config_file.resolve_camera({}, {"tls": False, "rtsp_tls": True})
         self.assertEqual(len(notes), 1)
         self.assertIn("verification is off", notes[0])
+
+
+class _ConfigProbeResult(TypedDict):
+    """JSON record emitted by the fixed, test-owned _CONFIG_PROBE below."""
+
+    config_error: str | None
+    isapi_scheme: str
+    rtsp_scheme: str
+    cam_base: str
+    rtsp_base: str
+    cam_tls: bool
+    cam_rtsp_tls: bool
+    cam_tls_verify: bool
+    cam_verify: bool
+    ffmpeg_tls_options: list[str]
+    notes: list[str]
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1797,7 +1868,7 @@ class ConfigModuleWiringTests(unittest.TestCase):
     os.environ and sys.modules), then asserts what the app would really use.
     """
 
-    def _probe(self, env_overrides: dict[str, str]) -> dict:
+    def _probe(self, env_overrides: dict[str, str]) -> _ConfigProbeResult:
         env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(_REPO_ROOT)}
         env.update(env_overrides)
         proc = subprocess.run(
@@ -1808,14 +1879,15 @@ class ConfigModuleWiringTests(unittest.TestCase):
             cwd=str(_REPO_ROOT),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        return json.loads(proc.stdout)
+        # The subprocess runs our fixed probe above, not arbitrary JSON input.
+        return cast(_ConfigProbeResult, json.loads(proc.stdout))
 
-    def _write_config(self, payload) -> str:
+    def _write_config(self, payload: object) -> str:
         path = Path(tempfile.mkdtemp()) / "camera.json"
         path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
         return str(path)
 
-    def test_no_file_gives_todays_plain_defaults(self):
+    def test_no_file_gives_todays_plain_defaults(self) -> None:
         out = self._probe({})
         self.assertIsNone(out["config_error"])
         self.assertEqual(out["cam_base"], "http://192.168.0.156:80")
@@ -1827,7 +1899,7 @@ class ConfigModuleWiringTests(unittest.TestCase):
         self.assertFalse(out["cam_verify"])
         self.assertEqual(out["ffmpeg_tls_options"], [])
 
-    def test_tls_https_isapi_pairs_with_plain_rtsp(self):
+    def test_tls_https_isapi_pairs_with_plain_rtsp(self) -> None:
         path = self._write_config({"camera": {"tls": True, "rtsp_tls": False}})
         out = self._probe({"VIEWER_CONFIG": path})
         self.assertIsNone(out["config_error"])
@@ -1839,7 +1911,7 @@ class ConfigModuleWiringTests(unittest.TestCase):
         self.assertFalse(out["cam_rtsp_tls"])
         self.assertEqual(out["ffmpeg_tls_options"], [])
 
-    def test_plain_isapi_pairs_with_rtsps(self):
+    def test_plain_isapi_pairs_with_rtsps(self) -> None:
         path = self._write_config({"camera": {"tls": False, "rtsp_tls": True}})
         out = self._probe({"VIEWER_CONFIG": path})
         self.assertIsNone(out["config_error"])
@@ -1850,10 +1922,11 @@ class ConfigModuleWiringTests(unittest.TestCase):
         self.assertTrue(out["cam_rtsp_tls"])
         self.assertEqual(out["ffmpeg_tls_options"], ["-tls_verify", "0"])
 
-    def test_a_broken_file_sets_config_error(self):
+    def test_a_broken_file_sets_config_error(self) -> None:
         path = self._write_config("{not json")
         out = self._probe({"VIEWER_CONFIG": path})
         self.assertIsNotNone(out["config_error"])
+        assert out["config_error"] is not None  # narrow the failure already asserted above
         self.assertIn(path, out["config_error"])
 
 
@@ -1863,21 +1936,21 @@ class CameraWarningsTests(unittest.TestCase):
     def _make(self, verify: bool) -> camera.Camera:
         return camera.Camera("https://cam", "u", "p", "rtsp://cam:554", 1.0, verify=verify)
 
-    def test_a_verifying_camera_never_disables_warnings(self):
-        with mock.patch.object(camera.urllib3, "disable_warnings") as disable:
+    def test_a_verifying_camera_never_disables_warnings(self) -> None:
+        with mock.patch("viewer.camera.urllib3.disable_warnings") as disable:
             self._make(True)
         disable.assert_not_called()
 
-    def test_a_non_verifying_camera_disables_the_insecure_request_warning(self):
-        with mock.patch.object(camera.urllib3, "disable_warnings") as disable:
+    def test_a_non_verifying_camera_disables_the_insecure_request_warning(self) -> None:
+        with mock.patch("viewer.camera.urllib3.disable_warnings") as disable:
             self._make(False)
-        disable.assert_called_once_with(camera.urllib3.exceptions.InsecureRequestWarning)
+        disable.assert_called_once_with(urllib3.exceptions.InsecureRequestWarning)
 
 
 class StreamTlsTests(unittest.TestCase):
     """The ffmpeg command grows RTSP TLS options only when rtsp_tls is on."""
 
-    def test_tls_off_adds_nothing_and_keeps_todays_rtsp_url(self):
+    def test_tls_off_adds_nothing_and_keeps_todays_rtsp_url(self) -> None:
         with mock.patch.multiple(
             config,
             CAM_TLS=False,
@@ -1895,7 +1968,7 @@ class StreamTlsTests(unittest.TestCase):
                 "rtsp://u:p@cam:554/Streaming/channels/101",
             )
 
-    def test_tls_on_uses_rtsps_and_the_verify_skip_flag(self):
+    def test_tls_on_uses_rtsps_and_the_verify_skip_flag(self) -> None:
         with mock.patch.multiple(
             config,
             CAM_TLS=True,
@@ -1913,11 +1986,11 @@ class StreamTlsTests(unittest.TestCase):
                 "rtsps://u:p@cam:322/Streaming/channels/101",
             )
 
-    def test_tls_on_with_verification_asks_ffmpeg_to_verify(self):
+    def test_tls_on_with_verification_asks_ffmpeg_to_verify(self) -> None:
         with mock.patch.multiple(config, CAM_TLS=True, CAM_RTSP_TLS=True, CAM_TLS_VERIFY=True):
             self.assertEqual(streams._tls_input_options(), ["-tls_verify", "1"])
 
-    def test_https_isapi_keeps_plain_rtsp_and_no_verify_flag(self):
+    def test_https_isapi_keeps_plain_rtsp_and_no_verify_flag(self) -> None:
         # The useful combination on this camera: HTTPS ISAPI, plain RTSP. The
         # -tls_verify input options belong to the RTSP connection, so they must
         # not appear just because ISAPI is on HTTPS.
@@ -1943,7 +2016,7 @@ class StreamTlsTests(unittest.TestCase):
             play[play.index("-i") + 1].startswith("rtsp://u:p@cam:554/Streaming/tracks/101")
         )
 
-    def test_rtsp_tls_alone_uses_rtsps_even_when_isapi_is_plain(self):
+    def test_rtsp_tls_alone_uses_rtsps_even_when_isapi_is_plain(self) -> None:
         with mock.patch.multiple(
             config,
             MOCK=False,
@@ -1961,7 +2034,7 @@ class StreamTlsTests(unittest.TestCase):
         self.assertIn("rtsps://u:p@cam:322/Streaming/channels/101", cmd[cmd.index("-i") + 1])
         self.assertEqual(cmd[cmd.index("-tls_verify") + 1], "0")
 
-    def test_tls_off_keeps_todays_live_command(self):
+    def test_tls_off_keeps_todays_live_command(self) -> None:
         with mock.patch.multiple(
             config,
             MOCK=False,
@@ -1977,7 +2050,7 @@ class StreamTlsTests(unittest.TestCase):
         self.assertNotIn("-tls_verify", cmd)
         self.assertEqual(cmd[cmd.index("-i") + 1], "rtsp://u:p@cam:554/Streaming/channels/101")
 
-    def test_tls_off_keeps_todays_playback_command(self):
+    def test_tls_off_keeps_todays_playback_command(self) -> None:
         with mock.patch.multiple(
             config,
             MOCK=False,
@@ -1997,7 +2070,7 @@ class StreamTlsTests(unittest.TestCase):
             "?starttime=20261012T194808Z&endtime=20261012T201036Z",
         )
 
-    def test_tls_on_uses_rtsps_in_the_playback_command(self):
+    def test_tls_on_uses_rtsps_in_the_playback_command(self) -> None:
         with mock.patch.multiple(
             config,
             MOCK=False,
@@ -2017,17 +2090,17 @@ class StreamTlsTests(unittest.TestCase):
 
 
 class CameraVerifyTests(unittest.TestCase):
-    def test_verify_defaults_to_requests_default(self):
+    def test_verify_defaults_to_requests_default(self) -> None:
         cam = camera.Camera("http://cam", "u", "p", "rtsp://cam", 5)
         self.assertTrue(cam.session.verify)
 
-    def test_verify_false_is_carried_to_the_session(self):
+    def test_verify_false_is_carried_to_the_session(self) -> None:
         cam = camera.Camera("https://cam", "u", "p", "rtsps://cam", 5, verify=False)
         self.assertFalse(cam.session.verify)
 
 
 class PlaybackUriSchemeTests(unittest.TestCase):
-    def test_normalize_rewrites_to_the_configured_scheme(self):
+    def test_normalize_rewrites_to_the_configured_scheme(self) -> None:
         uri = "rtsp://old:554/Streaming/tracks/101?starttime=x"
         self.assertEqual(
             util.normalize_playback_uri(uri, "rtsps://cam:322"),
