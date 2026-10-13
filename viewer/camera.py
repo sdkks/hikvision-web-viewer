@@ -221,7 +221,9 @@ class Camera:
     def download_stream(self, escaped_uri: str):
         """Stream a recorded file over HTTP via /ISAPI/ContentMgmt/download.
 
-        Returns the raw requests response (stream=True); caller iterates it.
+        Returns the raw requests response (stream=True); the caller iterates it
+        and must close it. A 401 is 'credentials refused'; any other non-200 is
+        the download service failing — the same typed model as _get/snapshot.
         NOTE: escaped_uri must keep XML escaping (&amp;) — raw '&' breaks the XML body.
         """
         body = (
@@ -231,7 +233,7 @@ class Camera:
             "</downloadRequest>"
         )
         try:
-            return self.session.get(
+            response = self.session.get(
                 self.base + "/ISAPI/ContentMgmt/download",
                 data=body.encode(),
                 headers={"Content-Type": "application/xml"},
@@ -240,6 +242,18 @@ class Camera:
             )
         except Exception as exc:
             raise _classify_requests_error(exc) from exc
+        if response.status_code == 200:
+            return response
+        status = response.status_code
+        try:
+            response.close()
+        except Exception:
+            pass
+        if status == 401:
+            raise CredentialsRejectedError(
+                "download -> HTTP 401 (the camera refused the viewer's credentials)"
+            )
+        raise ServiceDownError(f"download -> HTTP {status}")
 
     def stream_codec(self, channel: str) -> str:
         """Reported encoding of a streaming channel: 'H.264', 'H.265', ... ('' if unknown).

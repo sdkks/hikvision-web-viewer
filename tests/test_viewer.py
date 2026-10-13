@@ -624,6 +624,29 @@ class CameraCredentialsMappingTests(unittest.TestCase):
         with self.assertRaises(camera.CredentialsRejectedError):
             cam.snapshot_jpeg("101")
 
+    def test_download_401_is_credentials_and_closes(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        response = mock.Mock(status_code=401, headers={})
+        cam.session.get.return_value = response
+        with self.assertRaises(camera.CredentialsRejectedError):
+            cam.download_stream("rtsp://x")
+        response.close.assert_called_once()
+
+    def test_download_500_is_service_down(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        cam.session.get.return_value = mock.Mock(status_code=500, headers={})
+        with self.assertRaises(camera.ServiceDownError):
+            cam.download_stream("rtsp://x")
+
+    def test_download_200_returns_the_streaming_response(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        response = mock.Mock(status_code=200, headers={})
+        cam.session.get.return_value = response
+        self.assertIs(cam.download_stream("rtsp://x"), response)
+
 
 class _FakeCam:
     """Camera stand-in for motion_write: no network, records the PUT body."""
@@ -658,12 +681,13 @@ class _FakeBodyHandler:
         self.wfile = io.BytesIO()
         self.close_connection = False
         self.status = None
+        self.response_headers = {}
 
     def send_response(self, code, message=None):
         self.status = code
 
     def send_header(self, key, value):
-        pass
+        self.response_headers[key] = value
 
     def end_headers(self):
         pass
@@ -1156,6 +1180,122 @@ class PlayPageTests(unittest.TestCase):
         # The href is HTML-escaped (& -> &amp;) in the attribute.
         expected = f'href="/recordings?date={local.strftime("%Y-%m-%d")}&amp;hour={local.hour}"'
         self.assertIn(expected, html)
+
+
+class DownloadRouteTests(unittest.TestCase):
+    """route_download relays the camera stream and stays typed on failure."""
+
+    class _FakeDownload:
+        """requests-style streaming response stand-in (no camera, no network)."""
+
+        def __init__(self, chunks, content_type="video/mp4"):
+            self.status_code = 200
+            self.headers = {"Content-Type": content_type}
+            self._chunks = chunks
+            self.closed = False
+            self.chunk_size = None
+
+        def iter_content(self, chunk_size):
+            self.chunk_size = chunk_size
+            yield from self._chunks
+
+        def close(self):
+            self.closed = True
+
+    WINDOW = {"from": ["20261012T194808Z"], "to": ["20261012T201036Z"]}
+
+    def _app(self):
+        app = viewer_app.ViewerApp()
+        app.cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
+        return app
+
+    def test_bad_clip_parameters_are_a_typed_400(self):
+        handler = _FakeBodyHandler({})
+        self._app().route_download(handler, {"from": ["nope"], "to": ["nope"]})
+        self.assertEqual(handler.status, 400)
+        self.assertIn(b"Bad clip parameters", handler.wfile.getvalue())
+
+    def test_relays_the_camera_stream_with_download_headers(self):
+        app = self._app()
+        fake = self._FakeDownload([b"ab", b"", b"cdef"])
+        captured = {}
+
+        def fake_download(uri_escaped):
+            captured["uri"] = uri_escaped
+            return fake
+
+        app.cam.download_stream = fake_download
+        handler = _FakeBodyHandler({})
+        app.route_download(
+            handler,
+            {
+                "from": ["20261012T194808Z"],
+                "to": ["20261012T201036Z"],
+                "name": ["ch01_00000000000000000"],
+                "size": ["264532808"],
+            },
+        )
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.wfile.getvalue(), b"abcdef")
+        self.assertTrue(fake.closed)
+        self.assertEqual(fake.chunk_size, viewer_app.DOWNLOAD_CHUNK)
+        # The rebuilt playback URI keeps the camera's &amp; escaping and carries
+        # the file name/size the picker passed.
+        self.assertIn("starttime=20261012T194808Z&amp;endtime=20261012T201036Z", captured["uri"])
+        self.assertIn("&amp;name=ch01_00000000000000000", captured["uri"])
+        self.assertIn("&amp;size=264532808", captured["uri"])
+        self.assertEqual(
+            handler.response_headers["Content-Disposition"],
+            'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
+        )
+        self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
+
+    def test_unsafe_name_is_dropped_not_embedded(self):
+        app = self._app()
+        captured = {}
+
+        def fake_download(uri):
+            captured["uri"] = uri
+            return self._FakeDownload([])
+
+        app.cam.download_stream = fake_download
+        # A name the camera could never report must never reach the XML body.
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, {**self.WINDOW, "name": ["x</playbackURI><y>"]})
+        self.assertNotIn("</playbackURI>", captured["uri"])
+        self.assertNotIn("name=", captured["uri"])
+
+    def test_refused_credentials_render_the_credentials_card(self):
+        app = self._app()
+        app.cam.download_stream = mock.Mock(side_effect=camera.CredentialsRejectedError("401"))
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 502)
+        body = handler.wfile.getvalue().decode()
+        self.assertIn("refused the viewer", body)
+        self.assertNotIn("Traceback", body)
+
+    def test_service_down_offers_a_retry(self):
+        app = self._app()
+        app.cam.download_stream = mock.Mock(side_effect=camera.ServiceDownError("boom"))
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 503)
+        self.assertIn("/download?from=20261012T194808Z", handler.wfile.getvalue().decode())
+
+    def test_client_going_away_mid_stream_is_quiet(self):
+        app = self._app()
+
+        class _BrokenStream(self._FakeDownload):
+            def iter_content(self, chunk_size):
+                yield b"first"
+                raise BrokenPipeError("client gone")
+
+        fake = _BrokenStream([])
+        app.cam.download_stream = lambda uri: fake
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertTrue(fake.closed)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import base64
 import hmac
 import html
 import json
+import re
 from datetime import datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +16,12 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 STATIC_TYPES = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml"}
 
 CHANNELS = ("101", "102")
+
+# Download relay: stream the camera's file in 64 KiB chunks and never buffer it.
+DOWNLOAD_CHUNK = 64 * 1024
+# A camera file name is alnum/underscore/dot/dash; the query string is untrusted,
+# so anything else is dropped rather than embedded in the ISAPI XML body.
+_DOWNLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 # A motion body is at most a 18x22 boolean array; 1 MB is already generous.
 MAX_BODY_BYTES = 1_000_000
@@ -944,6 +951,126 @@ class ViewerApp:
         handler.send_header("Cache-Control", "no-store")
         handler.end_headers()
         handler.wfile.write(body)
+
+    def route_download(self, handler, query: dict):
+        """Relay a recorded file from the camera's ISAPI download endpoint.
+
+        The picker link carries the clip window plus the camera's own file name
+        and size, so the playback URI is rebuilt here from those fields — the
+        same shape /play constructs for RTSP (viewer/streams.py) and the same
+        shape as Clip.uri_escaped. A camera search per download is deliberately
+        avoided: it adds latency and depends on the search service this firmware
+        is known to drop. The camera ignores a narrowed window and streams the
+        whole stored file containing it, so neither the page nor the filename
+        promises a trimmed export — the filename names the window that was asked
+        for, not a video that was cut to it.
+        """
+        from_cam = (query.get("from", [""])[0] or "").strip()
+        to_cam = (query.get("to", [""])[0] or "").strip()
+        if not (util._CAM_RE.match(from_cam) and util._CAM_RE.match(to_cam)):
+            self.render(
+                handler,
+                "Download",
+                "<div class='errcard'><p>Bad clip parameters.</p>"
+                "<a class='retry' href='/recordings' style='display:inline-flex;"
+                "align-items:center;text-decoration:none'>&larr; Results</a></div>",
+                nav="recordings",
+                code=400,
+            )
+            return
+
+        name = (query.get("name", [""])[0] or "").strip()
+        size_raw = (query.get("size", [""])[0] or "").strip()
+        safe_name = name if _DOWNLOAD_NAME_RE.match(name) else ""
+
+        uri_escaped = (
+            f"rtsp://{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101/"
+            f"?starttime={from_cam}&amp;endtime={to_cam}"
+        )
+        if safe_name:
+            uri_escaped += f"&amp;name={html.escape(safe_name, quote=False)}"
+        if size_raw.isdigit():
+            uri_escaped += f"&amp;size={size_raw}"
+
+        retry_q = f"from={esc(from_cam)}&amp;to={esc(to_cam)}"
+        if safe_name:
+            retry_q += f"&amp;name={esc(safe_name)}"
+        if size_raw.isdigit():
+            retry_q += f"&amp;size={size_raw}"
+        retry_href = f"/download?{retry_q}"
+
+        try:
+            response = (
+                streams.mock_download_response()
+                if config.MOCK
+                else self.cam.download_stream(uri_escaped)
+            )
+        except camera.CredentialsRejectedError:
+            self._download_error(
+                handler,
+                CREDENTIALS_REFUSED,
+                "Fix the credentials and try the download again.",
+                code=502,
+            )
+            return
+        except camera.UnreachableError as exc:
+            self._download_error(
+                handler,
+                f"Camera unreachable at {config.CAM_HOST}.",
+                str(exc),
+                retry_href=retry_href,
+                code=502,
+            )
+            return
+        except camera.CameraError:
+            self._download_error(
+                handler,
+                "The camera's download service isn't responding.",
+                "Live view and playback may still work — try the download again in a moment.",
+                retry_href=retry_href,
+                code=503,
+            )
+            return
+
+        content_type = (getattr(response, "headers", None) or {}).get("Content-Type") or "video/mp4"
+        filename = f"clip_{from_cam}_{to_cam}.mp4"
+        try:
+            handler.send_response(200)
+            handler.send_header("Content-Type", content_type)
+            handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            for chunk in response.iter_content(DOWNLOAD_CHUNK):
+                if chunk:
+                    handler.wfile.write(chunk)
+        except BrokenPipeError, ConnectionResetError, TimeoutError:
+            pass  # the browser cancelled or vanished mid-download; nothing to report
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def _download_error(
+        self, handler, message: str, detail: str, retry_href: str = "", code: int = 502
+    ) -> None:
+        """A download failure is still a browser navigation: answer with a card."""
+        retry = ""
+        if retry_href:
+            retry = (
+                "<a class='retry' style='display:inline-flex;align-items:center;"
+                "text-decoration:none' "
+                f"href='{esc(retry_href)}'>Retry</a>"
+            )
+        self.render(
+            handler,
+            "Download",
+            f"<div class='errcard'><p>{esc(message)}</p>"
+            f"<p class='muted'>{esc(detail)}</p>{retry}</div>",
+            nav="recordings",
+            code=code,
+        )
 
     def route_snapshot(self, handler, query: dict):
         channel = query.get("ch", ["101"])[0] or "101"
