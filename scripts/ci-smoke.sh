@@ -109,7 +109,10 @@ class Hrefs(HTMLParser):
 
 opener = build_opener(NoRedirect)
 # MockCamera returns its fixture clip for this search, regardless of wall-clock date.
-for path in ("/", "/recordings?preset=7d", "/motion"):
+# The player is seeded with that same fixture window, so its clip actions -- and
+# the download link the page now carries -- are swept for dangling targets too.
+for path in ("/", "/recordings?preset=7d", "/motion",
+             "/play?from=20261012T194808Z&to=20261012T201036Z&size=264532808"):
     with opener.open(base + path, timeout=20) as response:
         assert response.status == 200, (path, response.status)
         Hrefs(base + path).feed(response.read().decode("utf-8"))

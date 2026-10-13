@@ -144,6 +144,7 @@ PLAY = Template("""<a class="back" href="$results_href">&larr; Results</a>
 </div>
 <p class="honest">Plays in real time &mdash; a $dur_h clip takes $dur_h. No seeking.</p>
 <p class="fallback"><span class="muted">Camera&rsquo;s current frame &mdash; a live still, not this clip:</span><a href="/snapshot?ch=101">Live still (main)</a><a href="/snapshot?ch=102">Live still (sub)</a></p>
+<p class="fallback"><a href="$download_href">&#8681; Download original recording</a><span class="muted">The camera&rsquo;s whole stored file &mdash; it ignores the requested window, so this is not cut to the clip.</span></p>
 <div id="endnote" class="endnote" hidden></div>
 <section id="jumps" hidden>
 <h2>Nearby recordings</h2>

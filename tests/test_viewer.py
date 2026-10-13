@@ -1191,6 +1191,35 @@ class PlayPageTests(unittest.TestCase):
         expected = f'href="/recordings?date={local.strftime("%Y-%m-%d")}&amp;hour={local.hour}"'
         self.assertIn(expected, html)
 
+    def test_download_link_uses_the_clip_window_and_size(self):
+        html = self._render(
+            {
+                "from": ["20261012T191200Z"],
+                "to": ["20261012T192000Z"],
+                "win": ["20261012T190000Z"],
+                "size": ["1000"],
+            }
+        )
+        # The clip's own window start, not the shortened session start, so a
+        # download after a restart still names the clip it came from.
+        self.assertIn(
+            'href="/download?from=20261012T190000Z&amp;to=20261012T192000Z&amp;size=1000"',
+            html,
+        )
+
+    def test_download_link_defaults_to_the_session_window(self):
+        html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
+        self.assertIn(
+            'href="/download?from=20261012T190000Z&amp;to=20261012T192000Z"',
+            html,
+        )
+
+    def test_download_label_is_honest_about_the_whole_file(self):
+        html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
+        self.assertIn("Download original recording", html)
+        # It is the camera's whole stored file, not an export trimmed to the clip.
+        self.assertIn("ignores the requested window", html)
+
 
 class DownloadSniffTests(unittest.TestCase):
     """The download's type and extension come from the bytes, not a guess."""

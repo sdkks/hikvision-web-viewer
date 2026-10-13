@@ -450,14 +450,26 @@ class ViewerApp:
         # window is simply the session's own [from, to].
         from_epoch = int(start_dt.timestamp())
         win_raw = (query.get("win", [""])[0] or "").strip()
-        window_from_epoch = from_epoch
+        window_from_dt = start_dt
         if win_raw:
             try:
-                window_from_epoch = int(util.parse_cam_time(win_raw).timestamp())
+                window_from_dt = util.parse_cam_time(win_raw)
             except ValueError:
-                window_from_epoch = from_epoch
+                window_from_dt = start_dt
         # The window can never begin after the session it contains.
-        window_from_epoch = min(window_from_epoch, from_epoch)
+        if window_from_dt > start_dt:
+            window_from_dt = start_dt
+        window_from_epoch = int(window_from_dt.timestamp())
+        # Download the clip's own window as the restart bar spans it: the original
+        # window start through the session end, never a shortened session start, so
+        # a download after a restart still names the clip it came from. The camera
+        # ignores the requested window and sends the whole stored file (see
+        # route_download), so the page must not promise a trimmed export.
+        size_q = f"&amp;size={size}" if size_raw.isdigit() else ""
+        download_href = (
+            f"/download?from={util.to_cam_time(window_from_dt)}"
+            f"&amp;to={util.to_cam_time(end_dt)}{size_q}"
+        )
         local_start = start_dt.astimezone()
         results_href = (
             f"/recordings?date={local_start.strftime('%Y-%m-%d')}&hour={local_start.hour}"
@@ -471,6 +483,7 @@ class ViewerApp:
             dur_s=dur_s,
             from_cam=esc(from_cam),
             to_cam=esc(to_cam),
+            download_href=download_href,
             from_epoch=from_epoch,
             window_from_epoch=window_from_epoch,
             to_epoch=int(end_dt.timestamp()),
