@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime, timedelta, timezone
+from typing import TypedDict
 
 CAM_FMT = "%Y%m%dT%H%M%SZ"
 SEARCH_OUT_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -83,7 +84,17 @@ def normalize_playback_uri(uri: str, rtsp_base: str, unescape: bool = True) -> s
     return re.sub(r"^rtsps?://[^/?]+", f"{base.scheme}://{base.netloc}", uri)
 
 
-def clip_fields(uri: str) -> dict:
+class ClipFields(TypedDict):
+    """The clip identity carried in a playbackURI query string."""
+
+    starttime: str
+    endtime: str
+    name: str
+    size: int
+    duration_s: int
+
+
+def clip_fields(uri: str) -> ClipFields:
     """Extract starttime/endtime/name/size from a playbackURI query string."""
     from urllib.parse import parse_qs, urlparse
 

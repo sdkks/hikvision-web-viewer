@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import IO, TypedDict
 
 from . import camera, config
 
@@ -25,7 +26,20 @@ HLS_ROOT = Path(tempfile.gettempdir()) / f"hikvision-viewer-hls-{config.BIND_POR
 LIVE_IDLE_S = 90
 PLAY_IDLE_S = 240
 
-_sessions: dict[str, dict] = {}
+
+class Session(TypedDict):
+    """One ffmpeg HLS session: the watchdog process and its per-session files."""
+
+    kind: str
+    key: str
+    proc: subprocess.Popen[bytes]
+    dir: Path
+    err_log: IO[bytes]
+    last_access: float
+    started: float
+
+
+_sessions: dict[str, Session] = {}
 _sessions_lock = threading.Lock()
 _reaper_lock = threading.Lock()
 _reaper_started = False
@@ -206,7 +220,7 @@ def _kill_orphans(directory: Path) -> None:
         pass  # no pkill here; the watchdog covers orphan cleanup
 
 
-def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> dict:
+def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> Session:
     """Spawn ffmpeg under a watchdog shell.
 
     The watchdog supervises ffmpeg:
@@ -249,7 +263,7 @@ def needs_transcode(codec: str) -> bool:
     return codec != "H.264"
 
 
-def ensure_live(channel: str, transcode: bool) -> dict:
+def ensure_live(channel: str, transcode: bool) -> Session:
     """Start or refresh the live HLS session for a channel."""
     key = live_key(channel)
     with _sessions_lock:
@@ -269,7 +283,7 @@ def ensure_live(channel: str, transcode: bool) -> dict:
         return session
 
 
-def ensure_play(from_cam: str, to_cam: str, transcode: bool) -> dict:
+def ensure_play(from_cam: str, to_cam: str, transcode: bool) -> Session:
     """Start or refresh the playback HLS session (single slot: kills previous)."""
     key = play_key(from_cam, to_cam)
     with _sessions_lock:
@@ -318,7 +332,7 @@ def stop_key(kind: str, ident: str) -> bool:
     return True
 
 
-def get_session(key: str) -> dict | None:
+def get_session(key: str) -> Session | None:
     """Touch and return a session if it is still alive."""
     with _sessions_lock:
         session = _sessions.get(key)
@@ -342,7 +356,7 @@ def kill_all() -> None:
         _sessions.clear()
 
 
-def _kill(session: dict) -> None:
+def _kill(session: Session) -> None:
     try:
         session.get("err_log") and session["err_log"].close()
     except Exception:

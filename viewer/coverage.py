@@ -7,6 +7,7 @@ the map and the range rows can never disagree.
 """
 
 from datetime import datetime, timedelta
+from typing import NotRequired, TypedDict
 
 from . import util
 from .camera import Clip
@@ -28,7 +29,47 @@ def _level(covered_minutes: int, total_minutes: int = 60) -> int:
     return 3
 
 
-def neighbours(files: list[dict], current_from: int, current_to: int, limit: int = 5) -> dict:
+class FileRecord(TypedDict):
+    """One recorded file row (what the SD card holds), ready for JSON."""
+
+    start_epoch: int
+    end_epoch: int
+    dur_s: int
+    size: int
+    name: str
+    start_local: str
+    end_local: str
+
+
+class RangeRecord(TypedDict):
+    """A merged contiguous coverage window; the *local display* fields are
+    filled in after merging, so they are optional while ranges are built."""
+
+    start_epoch: int
+    end_epoch: int
+    dur_s: int
+    clips: int
+    size: int
+    start_local: NotRequired[str]
+    end_local: NotRequired[str]
+
+
+class NeighbourFile(FileRecord):
+    """A neighbouring file plus the time skipped when jumping to it."""
+
+    gap_s: int
+
+
+class NeighboursResult(TypedDict):
+    earlier: list[NeighbourFile]
+    later: list[NeighbourFile]
+    more_earlier: bool
+    more_later: bool
+
+
+def neighbours(
+    files: list[FileRecord], current_from: int, current_to: int, limit: int = 5
+) -> NeighboursResult:
     """Recordings before/after the one being watched, nearest first.
 
     Each entry carries `gap_s`: how much time is skipped when jumping there, so
@@ -36,10 +77,12 @@ def neighbours(files: list[dict], current_from: int, current_to: int, limit: int
     """
     before = [f for f in files if f["end_epoch"] <= current_from]
     after = [f for f in files if f["start_epoch"] >= current_to]
-    earlier = [
+    earlier: list[NeighbourFile] = [
         {**f, "gap_s": max(0, current_from - f["end_epoch"])} for f in reversed(before[-limit:])
     ]
-    later = [{**f, "gap_s": max(0, f["start_epoch"] - current_to)} for f in after[:limit]]
+    later: list[NeighbourFile] = [
+        {**f, "gap_s": max(0, f["start_epoch"] - current_to)} for f in after[:limit]
+    ]
     return {
         "earlier": earlier,
         "later": later,
@@ -48,7 +91,18 @@ def neighbours(files: list[dict], current_from: int, current_to: int, limit: int
     }
 
 
-def build_coverage(clips: list[Clip], day_start: datetime) -> dict:
+class CoverageMap(TypedDict):
+    """A day's coverage: level tiles, per-hour counts, minute buckets, merged
+    ranges, and the individual file rows the SD card holds."""
+
+    hours: list[int]
+    hour_clips: list[int]
+    minutes: list[list[int]]
+    ranges: list[RangeRecord]
+    files: list[FileRecord]
+
+
+def build_coverage(clips: list[Clip], day_start: datetime) -> CoverageMap:
     """Build the coverage map for one local day.
 
     Args:
@@ -81,7 +135,7 @@ def build_coverage(clips: list[Clip], day_start: datetime) -> dict:
 
     hours = [_level(sum(1 for level in minutes[h] if level)) for h in range(24)]
 
-    ranges: list[dict] = []
+    ranges: list[RangeRecord] = []
     for start, end, size in sorted(spans):
         if ranges and start.timestamp() <= ranges[-1]["end_epoch"]:
             last = ranges[-1]
@@ -107,7 +161,7 @@ def build_coverage(clips: list[Clip], day_start: datetime) -> dict:
 
     # Individual recording files (what the SD card holds): each gets its own
     # play/download row, so a window can be consumed file by file.
-    files: list[dict] = []
+    files: list[FileRecord] = []
     for clip in sorted(clips, key=lambda c: c.start_dt):
         start = max(clip.start_dt.astimezone(), day_start)
         end = min(clip.end_dt.astimezone(), day_end)
@@ -134,7 +188,9 @@ def build_coverage(clips: list[Clip], day_start: datetime) -> dict:
     }
 
 
-def clip_to_window(files: list[dict], from_epoch: int, to_epoch: int) -> list[tuple[int, int]]:
+def clip_to_window(
+    files: list[FileRecord], from_epoch: int, to_epoch: int
+) -> list[tuple[int, int]]:
     """Clip recorded file intervals to [from_epoch, to_epoch], merged and sorted.
 
     The play page's restart bar needs second-precision covered spans, so it uses
@@ -189,9 +245,31 @@ def nearest_epoch(
     return int(min(max(best, from_epoch), to_epoch))
 
 
+class Gap(TypedDict):
+    start_epoch: int
+    end_epoch: int
+
+
+class SegmentOut(TypedDict):
+    start_epoch: int
+    end_epoch: int
+    start_pct: float
+    end_pct: float
+
+
+class WindowEligibility(TypedDict):
+    from_epoch: int
+    to_epoch: int
+    segments: list[SegmentOut]
+    gaps: list[Gap]
+    covered_s: int
+    has_eligible: bool
+    target_epoch: int
+
+
 def window_eligibility(
-    files: list[dict], from_epoch: int, to_epoch: int, target_epoch: int | None = None
-) -> dict:
+    files: list[FileRecord], from_epoch: int, to_epoch: int, target_epoch: int | None = None
+) -> WindowEligibility:
     """Eligible sub-intervals of a clip window plus the gaps between them.
 
     Pure geometry behind the play page's restart bar: clip the day's recorded
@@ -206,7 +284,7 @@ def window_eligibility(
     from_epoch, to_epoch = int(from_epoch), int(to_epoch)
     segments = clip_to_window(files, from_epoch, to_epoch)
 
-    gaps: list[dict] = []
+    gaps: list[Gap] = []
     cursor = from_epoch
     for start, end in segments:
         if start > cursor:
@@ -215,7 +293,7 @@ def window_eligibility(
     if cursor < to_epoch:
         gaps.append({"start_epoch": cursor, "end_epoch": to_epoch})
 
-    out_segments = [
+    out_segments: list[SegmentOut] = [
         {
             "start_epoch": start,
             "end_epoch": end,

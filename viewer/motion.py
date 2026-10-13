@@ -24,6 +24,9 @@ is named below:
 bit per cell, so the mask is not a separate value.
 """
 
+from collections.abc import Mapping
+from typing import TypedDict, TypeIs, cast
+
 ROWS = 18
 COLS = 22
 HEX_PER_ROW = 6  # 6 hex chars = 24 bits; 22 cells + 2 padding bits
@@ -147,13 +150,21 @@ def invert(rows: list[list[bool]]) -> list[list[bool]]:
     return rows
 
 
-def counts(rows: list[list[bool]]) -> dict:
+class Counts(TypedDict):
+    """Armed/masked/total cell tally for a zone map."""
+
+    armed: int
+    masked: int
+    total: int
+
+
+def counts(rows: list[list[bool]]) -> Counts:
     armed = sum(1 for row in rows for cell in row if cell)
     total = ROWS * COLS
     return {"armed": armed, "masked": total - armed, "total": total}
 
 
-def summary(counted: dict) -> str:
+def summary(counted: Counts) -> str:
     """Human sentence for the live region, e.g. '342 of 396 cells armed (86%)'."""
     total = counted.get("total") or (ROWS * COLS)
     armed = counted.get("armed", 0)
@@ -161,11 +172,11 @@ def summary(counted: dict) -> str:
     return f"{armed} of {total} cells armed ({pct}%)"
 
 
-def valid_sensitivity(value: object) -> bool:
+def valid_sensitivity(value: object) -> TypeIs[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value in SENSITIVITY_STEPS
 
 
-def diff(intended: dict, actual: dict) -> list[str]:
+def diff(intended: Mapping[str, object], actual: Mapping[str, object]) -> list[str]:
     """Human-readable differences between the requested and read-back state.
 
     The UI reports the readback, never the request; this is what makes drift
@@ -182,6 +193,8 @@ def diff(intended: dict, actual: dict) -> list[str]:
     if intended.get("sensitivity") != actual.get("sensitivity"):
         out.append(f"The camera kept sensitivity at {actual.get('sensitivity')}.")
     if intended.get("cells") != actual.get("cells"):
-        ac = counts(actual.get("cells") or empty_grid())
+        # The values are the boolean grids built by decode_gridmap/_motion_intent;
+        # Mapping widens them to object, so restate the known shape for counts().
+        ac = counts(cast("list[list[bool]]", actual.get("cells") or empty_grid()))
         out.append(f"The camera stored {ac['armed']} of {ac['total']} cells armed.")
     return out

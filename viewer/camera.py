@@ -12,6 +12,7 @@ Error model (maps 1:1 to the UI's honest states):
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TypedDict, cast
 from xml.etree import ElementTree
 
 import requests
@@ -78,6 +79,50 @@ class Clip:
     @property
     def end_dt(self) -> datetime:
         return util.parse_cam_time(self.end_utc)
+
+
+class DeviceInfo(TypedDict):
+    """The deviceInfo XML fields the footer/labels read (all text)."""
+
+    model: str
+    SerialNumber: str
+    firmwareVersion: str
+    firmwareReleasedDate: str
+
+
+class DeviceStatus(TypedDict):
+    """System status fields plus the parsed numeric uptime."""
+
+    deviceUpTime: str
+    cpuUtilization: str
+    memoryUsage: str
+    memoryAvailable: str
+    uptime_s: int
+
+
+class StorageInfo(TypedDict):
+    """The storage reply reduced to the fields the UI shows."""
+
+    status: str
+    capacity_mb: int
+    free_mb: int
+    writable: bool
+
+
+class MotionDoc(TypedDict):
+    """A parsed motionDetection document: the editable fields plus the raw
+    zone map that the editor decodes and re-encodes."""
+
+    enabled: bool
+    enableHighlight: bool
+    samplingInterval: str
+    startTriggerTime: str
+    endTriggerTime: str
+    regionType: str
+    rowGranularity: str
+    columnGranularity: str
+    sensitivityLevel: int
+    gridMap: str
 
 
 def _classify_requests_error(exc: Exception) -> CameraError:
@@ -159,7 +204,7 @@ class Camera:
         """Raw ISAPI document; callers merge our fields into THIS document."""
         return self._get(MOTION_PATH)
 
-    def motion_detection(self) -> dict:
+    def motion_detection(self) -> MotionDoc:
         """Parsed current zone config (raises BadResponseError on shape drift)."""
         return parse_motion_detection(self.motion_detection_xml())
 
@@ -168,23 +213,28 @@ class Camera:
         return self._put(MOTION_PATH, xml_text, "application/xml")
 
     # ── info endpoints ───────────────────────────────────────────────────
-    def device_info(self) -> dict:
+    def device_info(self) -> DeviceInfo:
         xml = self._get("/ISAPI/System/deviceInfo")
         return {
-            tag: _xml_text(xml, tag)
-            for tag in ("model", "SerialNumber", "firmwareVersion", "firmwareReleasedDate")
+            "model": _xml_text(xml, "model"),
+            "SerialNumber": _xml_text(xml, "SerialNumber"),
+            "firmwareVersion": _xml_text(xml, "firmwareVersion"),
+            "firmwareReleasedDate": _xml_text(xml, "firmwareReleasedDate"),
         }
 
-    def status(self) -> dict:
+    def status(self) -> DeviceStatus:
         xml = self._get("/ISAPI/System/status")
-        out = {
-            tag: _xml_text(xml, tag)
-            for tag in ("deviceUpTime", "cpuUtilization", "memoryUsage", "memoryAvailable")
+        device_up_time = _xml_text(xml, "deviceUpTime")
+        uptime_s = int(device_up_time) if device_up_time.isdigit() else 0
+        return {
+            "deviceUpTime": device_up_time,
+            "cpuUtilization": _xml_text(xml, "cpuUtilization"),
+            "memoryUsage": _xml_text(xml, "memoryUsage"),
+            "memoryAvailable": _xml_text(xml, "memoryAvailable"),
+            "uptime_s": uptime_s,
         }
-        uptime_s = int(out["deviceUpTime"]) if out["deviceUpTime"].isdigit() else 0
-        return {**out, "uptime_s": uptime_s}
 
-    def storage(self) -> dict:
+    def storage(self) -> StorageInfo:
         xml = self._get("/ISAPI/ContentMgmt/Storage")
         return parse_storage_response(xml)
 
@@ -310,7 +360,7 @@ class MockCamera(Camera):
         "&endtime=20261012T201036Z&name=ch01_00000000000000000&size=264532808"
     )
 
-    def device_info(self) -> dict:
+    def device_info(self) -> DeviceInfo:
         return {
             "model": "DS-2CV2121G2-IDW (mock)",
             "SerialNumber": "MOCKSERIAL20241107AAWRFS0000001",
@@ -318,7 +368,7 @@ class MockCamera(Camera):
             "firmwareReleasedDate": "build260827",
         }
 
-    def status(self) -> dict:
+    def status(self) -> DeviceStatus:
         return {
             "uptime_s": 4242,
             "cpuUtilization": "37",
@@ -327,7 +377,7 @@ class MockCamera(Camera):
             "deviceUpTime": "4242",
         }
 
-    def storage(self) -> dict:
+    def storage(self) -> StorageInfo:
         return {"status": "ok", "capacity_mb": 244016, "free_mb": 231500, "writable": True}
 
     def stream_codec(self, channel: str) -> str:
@@ -435,7 +485,7 @@ def _first_element(xml_text: str, local_name: str) -> ElementTree.Element | None
     return None
 
 
-def parse_storage_response(xml_text: str) -> dict:
+def parse_storage_response(xml_text: str) -> StorageInfo:
     """Parse /ISAPI/ContentMgmt/Storage into capacity/free/status/writable."""
     hdd = _first_element(xml_text, "hdd")
     if hdd is None:
@@ -570,7 +620,7 @@ def _register_namespaces(xml_text: str, root_ns: str) -> None:
         ElementTree.register_namespace("", root_ns)
 
 
-def parse_motion_detection(xml_text: str) -> dict:
+def parse_motion_detection(xml_text: str) -> MotionDoc:
     """Parse a /System/Video/inputs/channels/1/motionDetection reply.
 
     Raises BadResponseError when the grid shape is not the 18x22 bit map we can
@@ -637,7 +687,11 @@ def apply_motion_fields(
     if root.get("version") is None:
         root.set("version", "2.0")
     _register_namespaces(xml_text, ns)
-    return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+    # typeshed's ElementTree.tostring overload returns Any for the `encoding`
+    # form; the runtime result for encoding="utf-8" is always bytes.
+    return cast(bytes, ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)).decode(
+        "utf-8"
+    )
 
 
 def make_camera() -> Camera:

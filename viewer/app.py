@@ -5,10 +5,11 @@ import hmac
 import html
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import parse_qs, urlparse
 
 from . import camera, config, coverage, motion, streams, templates, util
@@ -176,6 +177,27 @@ def motion_guard_reason(handler: Any) -> str | None:
 def check_same_origin(handler: Any) -> bool:
     """True only when motion_guard_reason finds no objection."""
     return motion_guard_reason(handler) is None
+
+
+class MotionView(TypedDict):
+    """The motion state plus the derived counts/summary the UI renders."""
+
+    enabled: bool
+    enable_highlight: bool
+    sensitivity: int
+    cells: list[list[bool]]
+    counts: motion.Counts
+    summary: str
+
+
+class MotionIntent(TypedDict):
+    """A validated edit request: the state plus the encoded camera zone map."""
+
+    enabled: bool
+    enable_highlight: bool
+    sensitivity: int
+    cells: list[list[bool]]
+    gridMap: str
 
 
 class ViewerApp:
@@ -641,7 +663,7 @@ class ViewerApp:
             return
         day_start = datetime.combine(day, time.min).astimezone()
         day_end = day_start + timedelta(days=1)
-        payload = {
+        payload: dict[str, object] = {
             "date": day.isoformat(),
             "tz": str(datetime.now().astimezone().tzname()),
             "state": "ok",
@@ -702,7 +724,7 @@ class ViewerApp:
         if window_start > start:
             window_start = start
         day_start = start.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        payload = {
+        payload: dict[str, object] = {
             "state": "ok",
             "state_detail": "",
             "earlier": [],
@@ -753,7 +775,7 @@ class ViewerApp:
     # ── motion detection ────────────────────────────────────────────
     def _motion_view(
         self, enabled: bool, enable_highlight: bool, sensitivity: int, cells: list[list[bool]]
-    ) -> dict:
+    ) -> MotionView:
         counted = motion.counts(cells)
         return {
             "enabled": bool(enabled),
@@ -764,13 +786,13 @@ class ViewerApp:
             "summary": motion.summary(counted),
         }
 
-    def _motion_view_from_doc(self, doc: dict) -> dict:
+    def _motion_view_from_doc(self, doc: camera.MotionDoc) -> MotionView:
         cells = motion.decode_gridmap(doc["gridMap"])
         return self._motion_view(
             doc["enabled"], doc["enableHighlight"], doc["sensitivityLevel"], cells
         )
 
-    def _motion_intent(self, body: object) -> dict:
+    def _motion_intent(self, body: object) -> MotionIntent:
         """Validate an untrusted POST body into an intended state (raises ValueError)."""
         if not isinstance(body, dict):
             raise ValueError("body must be a JSON object")
@@ -883,7 +905,7 @@ class ViewerApp:
                 sock.settimeout(previous)
         self.send_json(handler, {"state": "bad_request", "state_detail": detail}, 400)
 
-    def motion_write(self, intended: dict) -> dict:
+    def motion_write(self, intended: MotionIntent) -> dict[str, object]:
         """GET fresh -> validate base -> merge -> PUT -> re-GET. The readback is the answer.
 
         `write_attempted` marks a PUT that may or may not have landed (a timeout or
@@ -989,13 +1011,13 @@ class ViewerApp:
             }
         return self._motion_ok(intended_view, actual_view)
 
-    def _motion_readback_safe(self) -> dict | None:
+    def _motion_readback_safe(self) -> MotionView | None:
         try:
             return self._motion_view_from_doc(self.cam.motion_detection())
         except camera.CameraError, ValueError:
             return None
 
-    def _motion_ok(self, intended_view: dict, actual_view: dict) -> dict:
+    def _motion_ok(self, intended_view: MotionView, actual_view: MotionView) -> dict[str, object]:
         differences = motion.diff(intended_view, actual_view)
         return {
             "state": "ok",
@@ -1006,7 +1028,7 @@ class ViewerApp:
             "state_detail": "",
         }
 
-    def send_json(self, handler: Any, payload: dict, code: int = 200) -> None:
+    def send_json(self, handler: Any, payload: Mapping[str, object], code: int = 200) -> None:
         body = json.dumps(payload).encode()
         handler.send_response(code)
         handler.send_header("Content-Type", "application/json")
