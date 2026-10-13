@@ -106,7 +106,7 @@ def check_auth(header_value: str | None) -> bool:
     )
 
 
-def esc(value: str) -> str:
+def esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
@@ -788,7 +788,7 @@ class ViewerApp:
             return None
 
     def route_motion_get(self, handler, query=None):
-        payload = {"state": "ok", "state_detail": ""}
+        payload: dict[str, object] = {"state": "ok", "state_detail": ""}
         try:
             doc = self.cam.motion_detection()
         except camera.CredentialsRejectedError:

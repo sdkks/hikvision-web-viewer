@@ -1,4 +1,4 @@
-.PHONY: setup install test lint format gates run run-mock docker-build docker-publish
+.PHONY: setup install test lint format typecheck gates run run-mock docker-build docker-publish
 
 PYTHON_VERSION ?= 3.14
 VENV ?= .venv
@@ -17,7 +17,7 @@ setup:
 		if command -v brew >/dev/null 2>&1; then brew install direnv; \
 		else echo "direnv is required: https://direnv.net/docs/installation.html"; exit 1; fi; }
 	uv venv $(VENV) --python $(PYTHON_VERSION) --seed
-	uv pip install --python $(PY) -r requirements.txt ruff pre-commit
+	uv pip install --python $(PY) -r requirements.txt -r requirements-dev.txt ruff pre-commit
 	$(VENV)/bin/pre-commit install
 	@echo ""
 	@echo "Setup complete."
@@ -35,10 +35,14 @@ lint:
 format:
 	$(PY) -m ruff format .
 
+typecheck:
+	$(PY) -m mypy --config-file pyproject.toml
+
 # Full local gate set (what CI checks, plus the pre-commit suite).
 gates:
 	$(PY) -m ruff check .
 	$(PY) -m ruff format --check .
+	$(PY) -m mypy --config-file pyproject.toml
 	$(PY) -B -m unittest discover -s tests
 	$(VENV)/bin/pre-commit run -a
 

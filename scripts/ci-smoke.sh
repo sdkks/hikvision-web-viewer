@@ -78,4 +78,52 @@ grep -qi '^content-type: video/mp4' /tmp/ci-smoke-download-headers.txt
 echo "== recordings page renders"
 curl -sf -m 5 "${BASE}/recordings" | grep -q "Recordings"
 
+echo "== rendered links resolve in mock mode"
+python - "${BASE}" <<'PY'
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, build_opener
+import sys
+
+base = sys.argv[1]
+origin = urlsplit(base)
+links = set()
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+class Hrefs(HTMLParser):
+    def __init__(self, page_url):
+        super().__init__(convert_charrefs=True)
+        self.page_url = page_url
+
+    def handle_starttag(self, tag, attrs):
+        for key, value in attrs:
+            if key != "href" or not value or value.startswith("#"):
+                continue
+            url = urljoin(self.page_url, value)
+            target = urlsplit(url)
+            if (target.scheme, target.netloc) == (origin.scheme, origin.netloc):
+                links.add(url)
+
+opener = build_opener(NoRedirect)
+# MockCamera returns its fixture clip for this search, regardless of wall-clock date.
+for path in ("/", "/recordings?preset=7d", "/motion"):
+    with opener.open(base + path, timeout=20) as response:
+        assert response.status == 200, (path, response.status)
+        Hrefs(base + path).feed(response.read().decode("utf-8"))
+assert any(urlsplit(url).path == "/download" for url in links), "no Download link rendered"
+for url in sorted(links):
+    print("checking", url, flush=True)
+    with opener.open(url, timeout=20) as response:
+        assert response.status == 200, (url, response.status)
+        body = response.read()
+        assert body, (url, "empty response")
+        if urlsplit(url).path == "/download":
+            assert response.headers.get_content_type() == "video/mp4", url
+            assert response.headers.get("Content-Disposition", "").startswith("attachment;"), url
+print(f"rendered-link sweep passed ({len(links)} links)")
+PY
+
 echo "smoke test passed"

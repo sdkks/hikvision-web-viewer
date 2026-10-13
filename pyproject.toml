@@ -6,3 +6,12 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["viewer", "tests"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_unused_configs = true
+show_error_codes = true
+pretty = false

@@ -166,8 +166,8 @@ class Camera:
             tag: _xml_text(xml, tag)
             for tag in ("deviceUpTime", "cpuUtilization", "memoryUsage", "memoryAvailable")
         }
-        out["uptime_s"] = int(out["deviceUpTime"]) if out["deviceUpTime"].isdigit() else 0
-        return out
+        uptime_s = int(out["deviceUpTime"]) if out["deviceUpTime"].isdigit() else 0
+        return {**out, "uptime_s": uptime_s}
 
     def storage(self) -> dict:
         xml = self._get("/ISAPI/ContentMgmt/Storage")

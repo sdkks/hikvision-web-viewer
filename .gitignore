@@ -8,5 +8,6 @@ __pycache__/
 config.env
 *.mp4
 *.jpg
+.mypy_cache/
 .DS_Store
 .gitleaks-report.json

@@ -23,6 +23,14 @@ repos:
         pass_filenames: false
         always_run: true
 
+      - id: mypy
+        name: Mypy static types
+        entry: .venv/bin/python -m mypy --config-file pyproject.toml
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
+
       - id: unittest
         name: deterministic unittest suite
         entry: .venv/bin/python -B -m unittest discover -s tests -v

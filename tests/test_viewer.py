@@ -383,8 +383,8 @@ class MotionGridTests(unittest.TestCase):
     def test_sensitivity_validation(self):
         for value in (0, 20, 40, 60, 80, 100):
             self.assertTrue(motion.valid_sensitivity(value))
-        for value in (55, -20, 101, "60", True, None):
-            self.assertFalse(motion.valid_sensitivity(value))
+        for invalid_value in (55, -20, 101, "60", True, None):
+            self.assertFalse(motion.valid_sensitivity(invalid_value))
 
     def test_diff_reports_drift(self):
         import copy
@@ -517,7 +517,7 @@ class MotionApiGuardTests(unittest.TestCase):
         # asked to leave masked while the error promises a boolean array.
         app = viewer_app.ViewerApp()
         rows = motion.empty_grid()
-        rows[0][0] = "0"
+        rows[0][0] = "0"  # type: ignore[call-overload]  # deliberately non-boolean cell
         with self.assertRaises(ValueError):
             app._motion_intent({"cells": rows, "sensitivity": 40})
 
@@ -532,7 +532,9 @@ class MotionApiGuardTests(unittest.TestCase):
             }
         )
         self.assertFalse(viewer_app.check_same_origin(handler))
-        self.assertIn("VIEWER_ALLOWED_HOSTS", viewer_app.motion_guard_reason(handler))
+        reason = viewer_app.motion_guard_reason(handler)
+        assert reason is not None
+        self.assertIn("VIEWER_ALLOWED_HOSTS", reason)
 
     def test_accepts_loopback_host_names(self):
         for host in ("localhost:8756", "127.0.0.1", "[::1]:8756"):
@@ -865,6 +867,7 @@ class MotionWriteTests(unittest.TestCase):
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "ok")
         self.assertIsNotNone(fake.put_body)
+        assert fake.put_body is not None
         self.assertIn("000003" * 18, fake.put_body)
 
 
@@ -873,7 +876,9 @@ class MotionPostBodyTests(unittest.TestCase):
 
     def _app(self):
         app = viewer_app.ViewerApp()
-        app.cam = _FakeCam(camera.MockCamera.MOCK_MOTION_XML, readback=None)
+        # This mock-body test intentionally injects a partial camera fake; the
+        # exercised path touches only the motion methods _FakeCam implements.
+        app.cam = _FakeCam(camera.MockCamera.MOCK_MOTION_XML, readback=None)  # type: ignore[assignment]
         return app
 
     def _handler(self, headers, body=b""):
@@ -1366,7 +1371,7 @@ class DownloadRouteTests(unittest.TestCase):
     def test_client_going_away_mid_stream_is_quiet(self):
         app = self._app()
 
-        class _BrokenStream(self._FakeDownload):
+        class _BrokenStream(DownloadRouteTests._FakeDownload):
             def iter_content(self, chunk_size):
                 yield b"first"
                 raise BrokenPipeError("client gone")
