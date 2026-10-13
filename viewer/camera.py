@@ -175,6 +175,19 @@ class Camera:
         except Exception as exc:
             raise _classify_requests_error(exc) from exc
 
+    def stream_codec(self, channel: str) -> str:
+        """Reported encoding of a streaming channel: 'H.264', 'H.265', ... ('' if unknown).
+
+        Used to decide copy vs transcode for the HLS session. Empty string on any
+        failure -> callers default to transcoding (always web-safe).
+        """
+        try:
+            xml = self._get(f"/ISAPI/Streaming/channels/{channel}")
+        except CameraError:
+            return ""
+        codec = _xml_text(xml, "videoCodecType").upper()
+        return codec if codec in ("H.264", "H.265", "H.265+") else ""
+
     def rtsp_live_url(self, channel: str) -> str:
         return f"{self.rtsp_base}/Streaming/channels/{channel}"
 

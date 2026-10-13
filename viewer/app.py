@@ -287,14 +287,16 @@ class ViewerApp:
             if channel not in CHANNELS:
                 handler.send_error(404)
                 return
-            session = streams.ensure_live(channel)
+            transcode = streams.needs_transcode(self.cam.stream_codec(channel))
+            session = streams.ensure_live(channel, transcode=transcode)
         elif kind == "play":
             from_cam = (query.get("from", [""])[0] or "").strip()
             to_cam = (query.get("to", [""])[0] or "").strip()
             if not (util._CAM_RE.match(from_cam) and util._CAM_RE.match(to_cam)):
                 handler.send_error(400, "bad clip window")
                 return
-            session = streams.ensure_play(from_cam, to_cam)
+            transcode = streams.needs_transcode(self.cam.stream_codec("101"))
+            session = streams.ensure_play(from_cam, to_cam, transcode=transcode)
         else:
             handler.send_error(404)
             return
@@ -318,10 +320,10 @@ class ViewerApp:
                     break
                 # camera busy or transient failure: respawn (single-slot enforced)
                 if session["kind"] == "play":
-                    session = streams.ensure_play(from_cam, to_cam)
+                    session = streams.ensure_play(from_cam, to_cam, transcode=transcode)
                 else:
                     channel = query.get("ch", ["101"])[0] or "101"
-                    session = streams.ensure_live(channel)
+                    session = streams.ensure_live(channel, transcode=transcode)
         if not playlist_path.is_file():
             handler.send_error(
                 503,
@@ -475,6 +477,16 @@ def make_handler(app: ViewerApp):
 
         def do_GET(self):
             app.dispatch(self)
+
+        def do_POST(self):
+            parsed = urlparse(self.path)
+            if parsed.path in ("/hls-live-stop", "/hls-play-stop"):
+                app.dispatch(self)
+            else:
+                handler = self
+                handler.send_response(405)
+                handler.send_header("Allow", "GET")
+                handler.end_headers()
 
     return Handler
 

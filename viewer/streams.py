@@ -22,7 +22,7 @@ from . import config
 
 HLS_ROOT = Path(tempfile.gettempdir()) / f"hikvision-viewer-hls-{config.BIND_PORT}"
 LIVE_IDLE_S = 90
-PLAY_IDLE_S = 600
+PLAY_IDLE_S = 240
 
 _sessions: dict[str, dict] = {}
 _sessions_lock = threading.Lock()
@@ -67,7 +67,7 @@ def _camera_rtsp(channel: str) -> str:
     return f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/channels/{channel}"
 
 
-def _live_cmd(channel: str, directory: Path) -> list[str]:
+def _live_cmd(channel: str, directory: Path, transcode: bool) -> list[str]:
     if config.MOCK:
         return [
             "ffmpeg",
@@ -128,7 +128,7 @@ def _live_cmd(channel: str, directory: Path) -> list[str]:
     ]
 
 
-def _play_cmd(from_cam: str, to_cam: str, directory: Path) -> list[str]:
+def _play_cmd(from_cam: str, to_cam: str, directory: Path, transcode: bool) -> list[str]:
     if config.MOCK:
         return [
             "ffmpeg",
@@ -238,7 +238,12 @@ def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> dict:
     }
 
 
-def ensure_live(channel: str) -> dict:
+def needs_transcode(codec: str) -> bool:
+    """H.264 copies verbatim (web-safe); anything else (HEVC, unknown) transcodes."""
+    return codec != "H.264"
+
+
+def ensure_live(channel: str, transcode: bool) -> dict:
     """Start or refresh the live HLS session for a channel."""
     key = live_key(channel)
     with _sessions_lock:
@@ -252,13 +257,13 @@ def ensure_live(channel: str) -> dict:
         _kill_orphans(directory)
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True, exist_ok=True)
-        session = _spawn("live", key, _live_cmd(channel, directory), directory)
+        session = _spawn("live", key, _live_cmd(channel, directory, transcode), directory)
         _sessions[key] = session
         _ensure_reaper()
         return session
 
 
-def ensure_play(from_cam: str, to_cam: str) -> dict:
+def ensure_play(from_cam: str, to_cam: str, transcode: bool) -> dict:
     """Start or refresh the playback HLS session (single slot: kills previous)."""
     key = play_key(from_cam, to_cam)
     with _sessions_lock:
@@ -277,7 +282,7 @@ def ensure_play(from_cam: str, to_cam: str) -> dict:
         _kill_orphans(directory)
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True, exist_ok=True)
-        session = _spawn("play", key, _play_cmd(from_cam, to_cam, directory), directory)
+        session = _spawn("play", key, _play_cmd(from_cam, to_cam, directory, transcode), directory)
         _sessions[key] = session
         _ensure_reaper()
         return session
