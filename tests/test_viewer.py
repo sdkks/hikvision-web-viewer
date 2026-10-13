@@ -3,6 +3,8 @@
 import io
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2576,6 +2578,51 @@ class RedactUrlCredentialsTests(unittest.TestCase):
         self.assertNotIn("secret", text)
         self.assertNotIn("admin", text)
         self.assertIn("rtsp://***:***@192.168.0.156:554/x", text)
+
+
+class RtspCredentialEncodingTests(unittest.TestCase):
+    """A password with /, a space or @ must not break the URL or reach a page.
+
+    The redactor cannot hide userinfo containing a raw / (it would have to guess
+    where the password ends and the host begins), and such a password also makes
+    the URL malformed, so the credential is percent-encoded where the URL is
+    built instead.
+    """
+
+    def test_userinfo_is_percent_encoded_in_both_urls(self) -> None:
+        with (
+            mock.patch.object(config, "CAM_USER", "adm/in"),
+            mock.patch.object(config, "CAM_PASS", "p@ss word/x"),
+        ):
+            live = streams._camera_rtsp("101")
+            playback = streams._playback_rtsp_url("a", "b")
+        for url in (live, playback):
+            self.assertNotIn("adm/in", url)
+            self.assertNotIn("p@ss word/x", url)
+            self.assertIn("adm%2Fin:p%40ss%20word%2Fx@", url)
+        self.assertIn("/Streaming/channels/101", live)
+        self.assertIn("/Streaming/tracks/101?starttime=a&endtime=b", playback)
+
+    def test_an_ordinary_password_is_left_alone(self) -> None:
+        with (
+            mock.patch.object(config, "CAM_USER", "admin"),
+            mock.patch.object(config, "CAM_PASS", "secret"),
+        ):
+            self.assertIn("rtsp://admin:secret@", streams._camera_rtsp("101"))
+
+    def test_the_encoded_form_is_still_redacted_on_the_card(self) -> None:
+        # ffmpeg echoes the URL we built, so this is the shape the card sees.
+        out = util.redact_url_credentials(
+            "Error opening input file "
+            "rtsp://adm%2Fin:p%40ss%20word%2Fx@192.168.0.156:554/Streaming/tracks/101"
+        )
+        self.assertNotIn("p%40ss", out)
+        self.assertIn("rtsp://***:***@192.168.0.156:554/Streaming/tracks/101", out)
+
+    def test_session_dirs_are_private_because_the_log_holds_the_url(self) -> None:
+        directory = streams._session_dir("mode-test")
+        self.addCleanup(shutil.rmtree, directory, True)
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
 
 
 if __name__ == "__main__":

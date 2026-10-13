@@ -20,6 +20,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, TypedDict
+from urllib.parse import quote
 
 from . import camera, config, util
 
@@ -91,10 +92,20 @@ def _hls_out(directory: Path, live: bool, transcode: bool) -> list[str]:
     ]
 
 
+def _rtsp_creds() -> str:
+    """Percent-encoded RTSP userinfo.
+
+    Userinfo must be percent-encoded (RFC 3986): a raw ``/`` or space in a password
+    makes the URL malformed, so ffmpeg parses the host wrong and the stream fails.
+    It also matters for secrecy - ffmpeg echoes the URL it could not open, and that
+    text can be shown on the download error card.
+    """
+    return f"{quote(config.CAM_USER, safe='')}:{quote(config.CAM_PASS, safe='')}@"
+
+
 def _camera_rtsp(channel: str) -> str:
-    creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
     return (
-        f"{config.RTSP_SCHEME}://{creds}{config.CAM_HOST}:{config.RTSP_PORT}"
+        f"{config.RTSP_SCHEME}://{_rtsp_creds()}{config.CAM_HOST}:{config.RTSP_PORT}"
         f"/Streaming/channels/{channel}"
     )
 
@@ -198,12 +209,9 @@ def _playback_rtsp_url(from_cam: str, to_cam: str) -> str:
     and the download fallback both drive it, and the camera admits only one such
     session at a time.
     """
-    from urllib.parse import quote
-
-    creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
     q = quote(f"starttime={from_cam}&endtime={to_cam}", safe="=&")
     return (
-        f"{config.RTSP_SCHEME}://{creds}{config.CAM_HOST}:{config.RTSP_PORT}"
+        f"{config.RTSP_SCHEME}://{_rtsp_creds()}{config.CAM_HOST}:{config.RTSP_PORT}"
         f"/Streaming/tracks/101?{q}"
     )
 
@@ -270,6 +278,19 @@ def _kill_orphans(directory: Path) -> None:
         pass  # no pkill here; the watchdog covers orphan cleanup
 
 
+def _session_dir(key: str) -> Path:
+    """Create the per-session directory, private to this user.
+
+    0700 because ffmpeg's stderr log holds the credentialled RTSP URL it could not
+    open: with the usual 0755, any local user on a shared /tmp could read the
+    camera password out of that log.
+    """
+    directory = HLS_ROOT / key
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    return directory
+
+
 def _spawn(
     kind: str, key: str, cmd: list[str], directory: Path, stdout: int = subprocess.DEVNULL
 ) -> Session:
@@ -323,10 +344,9 @@ def ensure_live(channel: str, transcode: bool) -> Session:
             return session
         if session:
             shutil.rmtree(session["dir"], ignore_errors=True)
-        directory = HLS_ROOT / key
-        _kill_orphans(directory)
-        shutil.rmtree(directory, ignore_errors=True)
-        directory.mkdir(parents=True, exist_ok=True)
+        _kill_orphans(HLS_ROOT / key)
+        shutil.rmtree(HLS_ROOT / key, ignore_errors=True)
+        directory = _session_dir(key)
         session = _spawn("live", key, _live_cmd(channel, directory, transcode), directory)
         _sessions[key] = session
         _ensure_reaper()
@@ -348,10 +368,9 @@ def ensure_play(from_cam: str, to_cam: str, transcode: bool) -> Session:
             return session
         if session:
             shutil.rmtree(session["dir"], ignore_errors=True)
-        directory = HLS_ROOT / key
-        _kill_orphans(directory)
-        shutil.rmtree(directory, ignore_errors=True)
-        directory.mkdir(parents=True, exist_ok=True)
+        _kill_orphans(HLS_ROOT / key)
+        shutil.rmtree(HLS_ROOT / key, ignore_errors=True)
+        directory = _session_dir(key)
         session = _spawn("play", key, _play_cmd(from_cam, to_cam, directory, transcode), directory)
         _sessions[key] = session
         _ensure_reaper()
@@ -436,10 +455,9 @@ def ensure_download(from_cam: str, to_cam: str) -> Session:
             return session
         if session:
             shutil.rmtree(session["dir"], ignore_errors=True)
-        directory = HLS_ROOT / key
-        _kill_orphans(directory)
-        shutil.rmtree(directory, ignore_errors=True)
-        directory.mkdir(parents=True, exist_ok=True)
+        _kill_orphans(HLS_ROOT / key)
+        shutil.rmtree(HLS_ROOT / key, ignore_errors=True)
+        directory = _session_dir(key)
         session = _spawn(
             "download", key, _download_cmd(from_cam, to_cam), directory, stdout=subprocess.PIPE
         )
