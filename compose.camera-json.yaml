@@ -1,0 +1,34 @@
+# Run the viewer with the camera described by a JSON file instead of HIK_* variables.
+#
+# Identical to compose.yaml except that it enables the VIEWER_CONFIG wiring that file
+# leaves commented out, and every path is relative to this directory - so the whole
+# tree can be copied (scp, rsync) to another host and started there unchanged:
+#
+#   podman compose -f compose.camera-json.yaml up -d --build      # or: docker compose
+#
+# camera.json holds the camera password in plaintext and is gitignored, like config.env,
+# which still supplies the viewer's own settings (bind, port, auth, TZ). The file wins
+# for the camera fields it sets; if it disagrees with HIK_* in config.env, startup says
+# so once. Use one file or the other, not both: they claim the same container name.
+services:
+  camera-viewer:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: sdkks/hikvision-web-viewer:local
+    container_name: hikvision-web-viewer
+    restart: unless-stopped
+    ports:
+      - "8756:8756"
+    env_file:
+      - config.env
+    environment:
+      # Reachable from the LAN / other devices; credentials come from camera.json.
+      VIEWER_BIND: 0.0.0.0
+      # Display timezone (container default is UTC): controls the times shown in the
+      # UI and the day boundaries used by the recordings picker.
+      TZ: Asia/Singapore
+      # Describe the camera in a mounted JSON file instead of HIK_* variables.
+      VIEWER_CONFIG: /config/camera.json
+    volumes:
+      - ./camera.json:/config/camera.json:ro
