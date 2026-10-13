@@ -228,10 +228,16 @@
     var params = new URLSearchParams(location.search);
     var from = params.get("from");
     var to = params.get("to");
+    // The restart bar's eligibility spans the original clip window, which can be
+    // wider than this session's start after a restart. Neighbours stay relative
+    // to the session start; only the coverage window follows `win`.
+    var win = params.get("win") || from;
     if (!from || !to) { publishNeighbours(null); return; }
 
     function load(attempt) {
-      fetch("/api/neighbours?from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to),
+      fetch("/api/neighbours?from=" + encodeURIComponent(from) +
+            "&to=" + encodeURIComponent(to) +
+            "&win=" + encodeURIComponent(win),
             { cache: "no-store" })
         .then(function (r) { return r.json(); })
         .then(function (data) {
@@ -322,10 +328,18 @@
     var endedHandled = false;
     var playedOnce = false; // distinguishes "autoplay blocked" from "user paused"
 
+    // Autoplay attempts exist to defeat the browser's autoplay policy, not to
+    // fight the viewer: once playback has genuinely started for this session, a
+    // pause belongs to the user and no later event may re-issue play().
+    function autoplay() {
+      if (playedOnce) return;
+      tryPlay(video);
+    }
+
     // Media events keep retrying: the first call often precedes usable data.
-    video.addEventListener("loadedmetadata", function () { tryPlay(video); });
-    video.addEventListener("canplay", function () { tryPlay(video); });
-    tryPlay(video);
+    video.addEventListener("loadedmetadata", autoplay);
+    video.addEventListener("canplay", autoplay);
+    autoplay();
 
     video.addEventListener("playing", function () {
       playedOnce = true;
@@ -381,14 +395,16 @@
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, function () {
         setStatus("connect", opts.live ? "Connecting…" : "Connecting to clip… starts at its beginning.");
-        tryPlay(video);
+        autoplay();
       });
       hls.on(Hls.Events.FRAG_BUFFERED, function () {
         if (!current.bufferedOnce) {
           current.bufferedOnce = true;
           setStatus("ok", opts.live ? "Live" : "Playing");
         }
-        tryPlay(video); // data is buffered now — the most likely moment to succeed
+        // Data is buffered now — the most likely moment for the first play() to
+        // succeed. A user pause after playback started must not be resumed here.
+        autoplay();
         window.setTimeout(function () {
           if (!playedOnce && video.paused && video.readyState >= 2) showTapStart(video);
         }, 1200);
@@ -538,10 +554,18 @@
     var cancel = document.getElementById("restart-cancel");
     if (!scrubber || !readout || !go) return;
 
-    var fromEpoch = Number(bar.dataset.fromEpoch || 0);
+    // Two distinct anchors, never conflated:
+    //   * the session start — where this playback began, the origin of the
+    //     wall-clock position estimate, and a fresh restart's default target;
+    //   * the window — the original clip the control spans. A restart moves the
+    //     session start but must not shrink the window, so the earlier part of
+    //     the clip stays reachable.
+    var sessionStart = Number(bar.dataset.fromEpoch || 0);
+    var windowFrom = Number(bar.dataset.windowFromEpoch || 0) || sessionStart;
     var toEpoch = Number(bar.dataset.toEpoch || 0);
     var size = Number(bar.dataset.size || 0);
-    if (!(toEpoch > fromEpoch)) return;
+    if (windowFrom > sessionStart) windowFrom = sessionStart;
+    if (!(toEpoch > windowFrom)) return;
 
     function pad(n) { return String(n).padStart(2, "0"); }
     function clock(epoch) {
@@ -560,9 +584,9 @@
       ticker: null,
     };
 
-    scrubber.min = String(fromEpoch);
+    scrubber.min = String(windowFrom);
     scrubber.max = String(toEpoch);
-    scrubber.value = String(fromEpoch);
+    scrubber.value = String(sessionStart);
     scrubber.disabled = true; // until coverage arrives; commit is disabled until then
 
     function coveredAt(epoch) {
@@ -583,7 +607,7 @@
         if (bestDist === null || dist < bestDist) { bestDist = dist; best = point; }
       }
       if (best === null) return null;
-      return Math.min(toEpoch, Math.max(fromEpoch, best));
+      return Math.min(toEpoch, Math.max(windowFrom, best));
     }
 
     function paintTrack() {
@@ -608,7 +632,7 @@
     }
 
     function updateAria() {
-      var target = ui.pending === null ? fromEpoch : ui.pending;
+      var target = ui.pending === null ? sessionStart : ui.pending;
       var word = !ui.known
         ? "coverage couldn\u2019t be checked"
         : ui.segments.length === 0
@@ -630,10 +654,14 @@
       } else if (!ui.known) {
         canCommit = true;
         warn = true;
-        text = "Coverage couldn\u2019t be checked. You can still restart, but the " +
-          "camera may have nothing at that time.";
+        // Show what Restart would actually do even when coverage is unknown:
+        // the warning sits beside the target, never instead of it.
+        var unknownTarget = ui.pending === null ? sessionStart : ui.pending;
+        text = "Restart here at " + clock(unknownTarget) +
+          " \u00b7 coverage couldn\u2019t be checked (the camera may have nothing " +
+          "at that time).";
       } else {
-        var target = ui.pending === null ? fromEpoch : ui.pending;
+        var target = ui.pending === null ? sessionStart : ui.pending;
         if (coveredAt(target)) {
           canCommit = true;
           // The chosen target is exact, so no "approximately" here; the only
@@ -653,12 +681,12 @@
       // status text; restart stays enabled.
       readout.classList.toggle("warn", warn);
       go.disabled = !canCommit;
-      if (cancel) cancel.hidden = !(canCommit && ui.pending !== null && ui.pending !== fromEpoch);
+      if (cancel) cancel.hidden = !(canCommit && ui.pending !== null && ui.pending !== sessionStart);
       updateAria();
     }
 
     function setPending(epoch) {
-      var raw = Math.min(toEpoch, Math.max(fromEpoch, Math.round(epoch)));
+      var raw = Math.min(toEpoch, Math.max(windowFrom, Math.round(epoch)));
       var snapped = ui.known ? nearestEligible(raw) : null;
       if (snapped !== null && snapped !== raw) {
         ui.pending = snapped;
@@ -674,14 +702,14 @@
     function cancelPreview() {
       ui.pending = null;
       ui.snapped = false;
-      scrubber.value = String(fromEpoch);
+      scrubber.value = String(sessionStart);
       renderSelection();
       try { scrubber.focus({ preventScroll: true }); } catch (e) { /* older browsers */ }
     }
 
     function commit() {
       if (go.disabled) return;
-      var target = ui.pending === null ? fromEpoch : ui.pending;
+      var target = ui.pending === null ? sessionStart : ui.pending;
       if (ui.known && !coveredAt(target)) return; // never restart into a known gap
       if (autoNextTimer) { clearInterval(autoNextTimer); autoNextTimer = null; }
       var endnote = document.getElementById("endnote");
@@ -689,14 +717,15 @@
       readout.textContent = "Restarting at " + clock(target) +
         " \u2014 new session, nearest keyframe\u2026";
       go.disabled = true;
-      // A navigation, not a seek: browser Back returns to the previous position.
-      window.location.href = playHref(target, toEpoch, size);
+      // A navigation, not a seek: browser Back returns to the previous start
+      // time. Carry the original window forward so restarts cannot shrink it.
+      window.location.href = playHref(target, toEpoch, size, windowFrom);
     }
 
     function positionEpoch() {
       if (!ui.playing || !ui.t0) return null;
-      var pos = fromEpoch + (Date.now() - ui.t0) / 1000;
-      return Math.min(toEpoch, Math.max(fromEpoch, pos));
+      var pos = sessionStart + (Date.now() - ui.t0) / 1000;
+      return Math.min(toEpoch, Math.max(sessionStart, pos));
     }
 
     function renderPosition() {
@@ -706,8 +735,8 @@
         if (counter) counter.textContent = "Position unknown \u2014 playback runs in real time.";
         return;
       }
-      var span = toEpoch - fromEpoch;
-      var frac = span > 0 ? (pos - fromEpoch) / span : 0;
+      var span = toEpoch - windowFrom;
+      var frac = span > 0 ? (pos - windowFrom) / span : 0;
       if (nowMark) {
         nowMark.hidden = false;
         // A native range thumb's centre travels [THUMB/2, width - THUMB/2], not
@@ -775,14 +804,14 @@
         ui.known = true;
         ui.segments = data.window.segments || [];
         var target = typeof data.window.target_epoch === "number"
-          ? data.window.target_epoch : fromEpoch;
+          ? data.window.target_epoch : sessionStart;
         scrubber.value = String(target);
         ui.pending = Number(scrubber.value);
       } else {
         ui.known = false;
         ui.segments = [];
-        ui.pending = fromEpoch;
-        scrubber.value = String(fromEpoch);
+        ui.pending = sessionStart;
+        scrubber.value = String(sessionStart);
       }
       scrubber.disabled = false;
       paintTrack();
@@ -1983,10 +2012,16 @@
     return new Date(epoch * 1000).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   }
 
-  function playHref(fromEpoch, toEpoch, size) {
+  function playHref(fromEpoch, toEpoch, size, windowFromEpoch) {
     var dur = Math.max(1, toEpoch - fromEpoch);
-    return "/play?from=" + camTime(fromEpoch) + "&to=" + camTime(toEpoch) +
+    var href = "/play?from=" + camTime(fromEpoch) + "&to=" + camTime(toEpoch) +
       "&dur=" + dur + "&size=" + (size || 0);
+    // Carry the original window forward so repeated restarts cannot shrink the
+    // control. Omitted on a first arrival, where the window is simply [from, to].
+    if (typeof windowFromEpoch === "number" && isFinite(windowFromEpoch)) {
+      href += "&win=" + camTime(windowFromEpoch);
+    }
+    return href;
   }
 
   /* ── boot ─────────────────────────────────────────────────────── */

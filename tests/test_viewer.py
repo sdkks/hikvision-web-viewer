@@ -842,6 +842,22 @@ class WindowEligibilityTests(unittest.TestCase):
         out = coverage.window_eligibility([self._file(200, 300)], 50, 350)
         self.assertEqual(out["target_epoch"], 200)
 
+    def test_target_epoch_can_differ_from_the_window_start(self):
+        # A restart moved the session start to 220 while the window still begins
+        # at 50; the preview must snap toward the session, not the window start.
+        files = [self._file(50, 150), self._file(200, 300)]
+        out = coverage.window_eligibility(files, 50, 300, target_epoch=220)
+        self.assertEqual(out["from_epoch"], 50)
+        self.assertEqual(out["to_epoch"], 300)
+        self.assertEqual(out["target_epoch"], 220)
+        # Without an explicit target the window start is snapped (first arrival).
+        self.assertEqual(coverage.window_eligibility(files, 50, 300)["target_epoch"], 50)
+
+    def test_target_epoch_snaps_out_of_a_gap_toward_the_session(self):
+        files = [self._file(50, 150), self._file(200, 300)]
+        out = coverage.window_eligibility(files, 50, 300, target_epoch=180)
+        self.assertEqual(out["target_epoch"], 200)
+
     def test_clip_to_window_inverted_window_is_empty(self):
         # from > to is invalid input; it must not fabricate coverage.
         files = [self._file(0, 100), self._file(100, 200)]
@@ -918,6 +934,42 @@ class NeighboursApiTests(unittest.TestCase):
         self.assertEqual(window["segments"][0]["end_pct"], 100.0)
         self.assertTrue(window["has_eligible"])
 
+    def test_win_widens_the_coverage_window_but_not_neighbours(self):
+        day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
+        early = self._clip(
+            util.to_cam_time(day.replace(hour=8, minute=0).astimezone(timezone.utc)),
+            util.to_cam_time(day.replace(hour=8, minute=10).astimezone(timezone.utc)),
+        )
+        current = self._clip(
+            util.to_cam_time(day.replace(hour=8, minute=14).astimezone(timezone.utc)),
+            util.to_cam_time(day.replace(hour=8, minute=30).astimezone(timezone.utc)),
+        )
+        cam = mock.Mock()
+        cam.search.return_value = [early, current]
+        app = viewer_app.ViewerApp()
+        app.cam = cam
+        handler = _FakeBodyHandler({})
+        from_cam = util.to_cam_time(day.replace(hour=8, minute=20).astimezone(timezone.utc))
+        to_cam = util.to_cam_time(day.replace(hour=8, minute=30).astimezone(timezone.utc))
+        win_cam = util.to_cam_time(day.replace(hour=8, minute=0).astimezone(timezone.utc))
+
+        app.route_neighbours(handler, {"from": [from_cam], "to": [to_cam], "win": [win_cam]})
+        payload = json.loads(handler.wfile.getvalue())
+
+        self.assertEqual(payload["state"], "ok")
+        # Neighbours stay relative to the session start (08:20): the 08:00 clip
+        # ends earlier and must still appear as a jump.
+        self.assertEqual(len(payload["earlier"]), 1)
+        # The coverage window now spans the original window start, 08:00.
+        window = payload["window"]
+        win_epoch = int(util.parse_cam_time(win_cam).timestamp())
+        from_epoch = int(util.parse_cam_time(from_cam).timestamp())
+        self.assertEqual(window["from_epoch"], win_epoch)
+        self.assertLess(window["from_epoch"], from_epoch)
+        self.assertEqual(window["segments"][0]["start_epoch"], win_epoch)
+        # The preview target follows the session start, not the window start.
+        self.assertEqual(window["target_epoch"], from_epoch)
+
     def test_unknown_search_state_omits_window(self):
         cam = mock.Mock()
         cam.search.side_effect = camera.ServiceDownError("down")
@@ -954,6 +1006,52 @@ class NeighboursApiTests(unittest.TestCase):
         self.assertNotIn("window", payload)
         for key in ("earlier", "later", "more_earlier", "more_later"):
             self.assertIn(key, payload)
+
+
+class PlayPageTests(unittest.TestCase):
+    """page_play keeps the session start and the original window start separate."""
+
+    def _render(self, query):
+        app = viewer_app.ViewerApp()
+        app.cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
+        handler = _FakeBodyHandler({})
+        app.page_play(handler, query)
+        return handler.wfile.getvalue().decode()
+
+    def test_window_defaults_to_the_session_start(self):
+        html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
+        from_epoch = int(util.parse_cam_time("20261012T190000Z").timestamp())
+        self.assertIn(f'data-from-epoch="{from_epoch}"', html)
+        self.assertIn(f'data-window-from-epoch="{from_epoch}"', html)
+
+    def test_window_param_preserves_the_original_window(self):
+        html = self._render(
+            {
+                "from": ["20261012T191200Z"],
+                "to": ["20261012T192000Z"],
+                "win": ["20261012T190000Z"],
+            }
+        )
+        from_epoch = int(util.parse_cam_time("20261012T191200Z").timestamp())
+        win_epoch = int(util.parse_cam_time("20261012T190000Z").timestamp())
+        self.assertIn(f'data-from-epoch="{from_epoch}"', html)
+        self.assertIn(f'data-window-from-epoch="{win_epoch}"', html)
+
+    def test_window_after_the_session_is_clamped_back(self):
+        html = self._render(
+            {
+                "from": ["20261012T191200Z"],
+                "to": ["20261012T192000Z"],
+                "win": ["20261012T191800Z"],
+            }
+        )
+        from_epoch = int(util.parse_cam_time("20261012T191200Z").timestamp())
+        self.assertIn(f'data-window-from-epoch="{from_epoch}"', html)
+
+    def test_caveat_names_the_previous_start_time(self):
+        html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
+        self.assertIn("previous start time", html)
+        self.assertNotIn("previous position", html)
 
 
 if __name__ == "__main__":

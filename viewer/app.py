@@ -361,6 +361,21 @@ class ViewerApp:
         size_raw = (query.get("size", [""])[0] or "").strip()
         size = int(size_raw) if size_raw.isdigit() else 0
         size_part = f" &middot; {util.human_size(size)}" if size else ""
+        # The restart bar spans the original clip window, not just where this
+        # session started: a restart into the middle of a clip must not remove
+        # the earlier part from the control. `win` carries that window start
+        # across restarts; without it (a first arrival from the picker) the
+        # window is simply the session's own [from, to].
+        from_epoch = int(start_dt.timestamp())
+        win_raw = (query.get("win", [""])[0] or "").strip()
+        window_from_epoch = from_epoch
+        if win_raw:
+            try:
+                window_from_epoch = int(util.parse_cam_time(win_raw).timestamp())
+            except ValueError:
+                window_from_epoch = from_epoch
+        # The window can never begin after the session it contains.
+        window_from_epoch = min(window_from_epoch, from_epoch)
         content = templates.PLAY.substitute(
             start_local=esc(util.local_display(start_dt)),
             end_local=esc(util.local_display(end_dt)),
@@ -369,7 +384,8 @@ class ViewerApp:
             dur_s=dur_s,
             from_cam=esc(from_cam),
             to_cam=esc(to_cam),
-            from_epoch=int(start_dt.timestamp()),
+            from_epoch=from_epoch,
+            window_from_epoch=window_from_epoch,
             to_epoch=int(end_dt.timestamp()),
             size_raw=size,
         )
@@ -566,6 +582,20 @@ class ViewerApp:
             return
         start = util.parse_cam_time(from_cam)
         end = util.parse_cam_time(to_cam)
+        # The restart bar's coverage window can be wider than this session's
+        # start after any number of restarts; `win` names that original start.
+        # Neighbours stay relative to the current session start (`start`), while
+        # only the window eligibility follows the wider window.
+        window_start = start
+        win_cam = (query.get("win", [""])[0] or "").strip()
+        if win_cam:
+            try:
+                window_start = util.parse_cam_time(win_cam)
+            except ValueError:
+                window_start = start
+        # A window that begins after the session it contains is meaningless.
+        if window_start > start:
+            window_start = start
         day_start = start.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         payload = {
             "state": "ok",
@@ -606,7 +636,10 @@ class ViewerApp:
                 # window, clipped from the same day search this handler already
                 # ran so the play page never triggers a second camera search.
                 payload["window"] = coverage.window_eligibility(
-                    built["files"], int(start.timestamp()), int(end.timestamp())
+                    built["files"],
+                    int(window_start.timestamp()),
+                    int(end.timestamp()),
+                    target_epoch=int(start.timestamp()),
                 )
         self.send_json(handler, payload)
 

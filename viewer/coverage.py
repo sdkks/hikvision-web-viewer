@@ -188,14 +188,19 @@ def nearest_epoch(
     return int(min(max(best, from_epoch), to_epoch))
 
 
-def window_eligibility(files: list[dict], from_epoch: int, to_epoch: int) -> dict:
+def window_eligibility(
+    files: list[dict], from_epoch: int, to_epoch: int, target_epoch: int | None = None
+) -> dict:
     """Eligible sub-intervals of a clip window plus the gaps between them.
 
     Pure geometry behind the play page's restart bar: clip the day's recorded
     files to [from_epoch, to_epoch], merge them, and describe what is covered,
-    what is a gap, and the nearest eligible instant to the window start. The
-    whole window being a gap is a real state (no covered instant) that the UI
-    must not confuse with "coverage couldn't be checked".
+    what is a gap, and the eligible instant nearest `target_epoch`. The window
+    start and the snap target are independent: after a restart the window can
+    begin earlier than the session's start, but the preview must still snap
+    toward where the session actually is. `target_epoch` defaults to the window
+    start. The whole window being a gap is a real state (no covered instant)
+    that the UI must not confuse with "coverage couldn't be checked".
     """
     from_epoch, to_epoch = int(from_epoch), int(to_epoch)
     segments = clip_to_window(files, from_epoch, to_epoch)
@@ -218,7 +223,8 @@ def window_eligibility(files: list[dict], from_epoch: int, to_epoch: int) -> dic
         }
         for start, end in segments
     ]
-    target = nearest_epoch(segments, from_epoch, from_epoch, to_epoch)
+    snap_from = from_epoch if target_epoch is None else int(target_epoch)
+    target = nearest_epoch(segments, snap_from, from_epoch, to_epoch)
     return {
         "from_epoch": from_epoch,
         "to_epoch": to_epoch,
