@@ -1,0 +1,90 @@
+name: Container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: amd64
+          - runner: ubuntu-26.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute base tag
+        id: tags
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "base=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=edge" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push ${{ matrix.arch }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.tags.outputs.base }}-${{ matrix.arch }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  manifest:
+    name: multi-arch manifest
+    needs: build
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Combine arch images into convenience tags
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            BASE="${GITHUB_REF_NAME}"
+            docker buildx imagetools create -t "${IMAGE}:${BASE}" \
+              "${IMAGE}:${BASE}-amd64" "${IMAGE}:${BASE}-arm64"
+            docker buildx imagetools create -t "${IMAGE}:latest" \
+              "${IMAGE}:${BASE}-amd64" "${IMAGE}:${BASE}-arm64"
+          else
+            docker buildx imagetools create -t "${IMAGE}:edge" \
+              "${IMAGE}:edge-amd64" "${IMAGE}:edge-arm64"
+          fi

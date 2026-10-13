@@ -43,6 +43,10 @@ Browser: static/app.js (hls.js) ────────────────
 | `static/app.js` | hls.js player, status states, visibility/pagehide lifecycle |
 | `static/style.css` | Dark, mobile-first design tokens |
 | `tests/test_viewer.py` | Unit tests (time math, parsing, auth, mock camera) |
+| `scripts/ci-smoke.sh` | Integration smoke test used by CI (mock session, HLS, stop, no-ffmpeg) |
+| `.github/workflows/ci.yml` | Gates on ubuntu-26.04 amd64 + arm64 |
+| `.github/workflows/container.yml` | Multi-arch container publish to GHCR on tags |
+| `Makefile` | install / gates / run-mock / docker-build / docker-publish |
 
 ---
 

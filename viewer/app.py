@@ -541,12 +541,15 @@ def run() -> None:
 
     app = ViewerApp()
 
-    def _shutdown(*_args) -> None:
+    def _cleanup() -> None:
+        streams.kill_all()
+
+    def _on_sigterm(*_args) -> None:
         streams.kill_all()
         sys.exit(0)
 
-    atexit.register(_shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+    atexit.register(_cleanup)
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     server = ThreadingHTTPServer((config.BIND_HOST, config.BIND_PORT), make_handler(app))
     server.daemon_threads = True

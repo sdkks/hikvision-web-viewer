@@ -82,6 +82,17 @@ JavaScript or not.
 - Recording search is served by the camera's app layer, which on some firmware is unreliable —
   the UI names that state instead of pretending it is "no clips".
 
+## Container image (GHCR)
+
+Prebuilt multi-arch images are published on version tags:
+
+```bash
+podman run -d --name camera-viewer -p 8756:8756 --env-file config.env \
+  ghcr.io/sdkks/hikvision-web-viewer:latest
+# per-arch tags: :latest-amd64 / :latest-arm64 (or :<version>-amd64/-arm64)
+# rolling main builds: :edge / :edge-amd64 / :edge-arm64
+```
+
 ## Run with podman (NAS / always-on box)
 
 ```bash

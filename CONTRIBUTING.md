@@ -87,6 +87,38 @@ review of those gates.
 - **Update the docs.** If you change configuration or behaviour, update
   `README.md` and `AGENTS.md`.
 
+## Continuous integration
+
+Every push and pull request runs the gates on **Ubuntu 26.04 (amd64) and
+Ubuntu 26.04 (arm64)** (`ubuntu-26.04`, `ubuntu-26.04-arm` — free for public
+repos), plus an integration smoke test (`scripts/ci-smoke.sh`) that starts the
+server in mock mode, plays a real HLS session, checks the segment is H.264,
+exercises the stop route, and asserts no ffmpeg survives.
+
+Run the same smoke test locally:
+
+```bash
+HIK_MOCK=1 VIEWER_PORT=8799 venv/bin/python -m viewer.app &
+VIEWER_PORT=8799 bash scripts/ci-smoke.sh
+```
+
+Pushing a `v*` tag also builds and publishes multi-arch container images to
+GHCR (`.github/workflows/container.yml`):
+
+- `ghcr.io/sdkks/hikvision-web-viewer:<version>-amd64` / `-arm64` (per-arch)
+- `ghcr.io/sdkks/hikvision-web-viewer:<version>` and `:latest` (multi-arch manifests)
+- `:edge` / `:edge-amd64` / `:edge-arm64` from `main`
+
+For a local publish, use `make docker-publish` (podman manifest, tags a version
+and the current commit).
+
+Auth notes: in Actions, `secrets.GITHUB_TOKEN` with `packages: write` is enough
+to push to GHCR — no PAT required. For local publishing, `podman login ghcr.io`
+with a token that has `write:packages`. New GHCR packages start **private**;
+flip visibility to public once in the package settings if you want anonymous
+pulls.
+
+
 ## Pull requests
 
 Fill in the PR template — it includes the checklist confirming that hooks are
