@@ -52,8 +52,8 @@ Browser: static/app.js (hls.js) ────────────────
 | `static/style.css` | Dark, mobile-first design tokens |
 | `tests/test_viewer.py` | Unit tests (time math, parsing, auth, mock camera, motion grid + API guard) |
 | `scripts/ci-smoke.sh` | Integration smoke test used by CI (mock session, HLS, stop, no-ffmpeg) |
-| `.github/workflows/ci.yml` | Gates on ubuntu-26.04 amd64 + arm64 |
-| `.github/workflows/container.yml` | Multi-arch container publish to GHCR on tags |
+| `.github/workflows/ci.yml` | Gates on ubuntu-26.04 amd64 + arm64; skipped for docs-only changes |
+| `.github/workflows/container.yml` | Multi-arch image publish to GHCR on main and tags; skipped for docs-only changes |
 | `Makefile` | setup / gates / typecheck / run-mock / docker-build / docker-publish |
 | `.envrc` | direnv: activates `.venv` and sources `config.env` if present |
 

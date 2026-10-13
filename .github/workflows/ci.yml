@@ -3,7 +3,23 @@ name: CI
 on:
   push:
     branches: [main]
+    # Documentation, the licence and the environment/deployment files cannot change the gates,
+    # so they do not spend runners. This is evaluated on what changed, not on the commit
+    # message: a commit that touches anything else still runs the whole job, so a mislabelled
+    # change can never skip the gates. Path filters do not apply to tag pushes.
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - "compose*.yaml"
+      - "config.env.example"
+      - ".gitignore"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - "compose*.yaml"
+      - "config.env.example"
+      - ".gitignore"
   workflow_dispatch:
 
 permissions:
