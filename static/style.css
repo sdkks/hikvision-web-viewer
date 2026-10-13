@@ -483,7 +483,21 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 }
 
 /* ── motion detection editor ───────────────────────────────────── */
-.zonecard { margin: 12px 0; }
+/* The work (the painted still) and its tools sit side by side on desktop.
+   On phones the tools stack directly under the still, so painting and its
+   controls share a viewport. The tool column is a normal grid cell, never a
+   sticky panel; a dirty notice inside it cannot move the still. */
+.zoneeditor { display: grid; gap: 12px; margin: 12px 0; }
+.zonework { min-width: 0; }
+.zonecard { margin: 0; }
+.zonetools { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.zonetools > .zgroup { padding: 4px 10px 6px; }
+.zonetools > .zgroup, .zonetools > .zoneprimary, .zonetools > .dirtybar { margin: 0; }
+.toolrow { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.toolrow .copybtn { margin: 0; }
+@media (min-width: 720px) {
+  .zoneeditor { grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); align-items: start; gap: 16px; }
+}
 
 .zoneviewport {
   overflow: auto; max-height: 62vh; background: #000;
@@ -543,7 +557,6 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 }
 .segbtn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
-.zonequickcontrols { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 8px 12px; margin: 12px 0; }
 .warnnote { color: var(--warn); border: 1px solid var(--warn); border-radius: var(--radius); background: var(--surface); padding: 8px 10px; margin: 8px 0; }
 
 .zonecoarse { margin: 12px 0; }

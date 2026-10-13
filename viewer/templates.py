@@ -157,15 +157,10 @@ PLAY = Template("""<a class="back" href="$results_href">&larr; Results</a>
 
 MOTION = Template("""<h1>Motion detection</h1>
 <p id="motion-status" class="status" role="status"><span class="dot spin"></span><span class="label">Reading the camera&hellip;</span></p>
-<section id="motion-dirty" class="dirtybar" hidden>
-<p id="motion-dirty-text">Changes not applied.</p>
-<div class="row">
-<button type="button" id="motion-apply-top" class="searchbtn">Apply to camera</button>
-<button type="button" id="motion-discard-top" class="copybtn">Discard changes</button>
-</div>
-</section>
 <div id="motion-error" class="errcard" hidden></div>
 <noscript><div class="errcard"><p>Editing motion zones needs JavaScript. This page is read-only without it.</p>$ssr_summary</div></noscript>
+<section class="zoneeditor">
+<div class="zonework">
 <section class="zonecard">
 <div class="zoneviewport" id="zone-viewport">
 <div class="zonecanvas" id="zone-canvas">
@@ -175,19 +170,38 @@ MOTION = Template("""<h1>Motion detection</h1>
 </div>
 <p class="legend"><span><span class="swatch armed"></span>armed &mdash; motion here triggers</span><span><span class="swatch masked"></span>masked &mdash; ignored</span><span><span class="swatch cursor"></span>cursor</span></p>
 <p class="muted" id="zone-hint" hidden>Zoom in to edit individual cells.</p>
+<p class="muted warnnote" id="motion-warn" hidden></p>
 </section>
-<section class="zonequickcontrols" aria-label="Zone controls">
-<fieldset class="zgroup">
-<legend>Detection</legend>
-<label class="ztoggle"><input type="checkbox" id="motion-enabled"> Motion detection on</label>
-<p class="muted" id="motion-off-note" hidden>Motion detection is off &mdash; these zones do nothing until you turn it on.</p>
-</fieldset>
+</div>
+<aside class="zonetools" aria-label="Motion editing tools">
 <fieldset class="zgroup">
 <legend>Tool</legend>
+<div class="toolrow">
 <div class="segmented" id="tool-group" role="group" aria-label="Paint tool">
 <button type="button" class="segbtn" data-tool="arm" aria-pressed="true">Arm</button>
 <button type="button" class="segbtn" data-tool="mask" aria-pressed="false">Mask</button>
 </div>
+<div class="segmented" role="group" aria-label="Undo and redo">
+<button type="button" class="copybtn" id="undo" disabled>Undo</button>
+<button type="button" class="copybtn" id="redo" disabled>Redo</button>
+</div>
+</div>
+</fieldset>
+<p class="zoneprimary">
+<button type="button" id="motion-apply" class="searchbtn">Apply to camera</button>
+<button type="button" id="motion-discard" class="copybtn" hidden>Discard changes</button>
+</p>
+<section id="motion-dirty" class="dirtybar" hidden>
+<p id="motion-dirty-text">Changes not applied.</p>
+<div class="row">
+<button type="button" id="motion-apply-top" class="searchbtn">Apply to camera</button>
+<button type="button" id="motion-discard-top" class="copybtn">Discard changes</button>
+</div>
+</section>
+<fieldset class="zgroup">
+<legend>Detection</legend>
+<label class="ztoggle"><input type="checkbox" id="motion-enabled"> Motion detection on</label>
+<p class="muted" id="motion-off-note" hidden>Motion detection is off &mdash; these zones do nothing until you turn it on.</p>
 </fieldset>
 <fieldset class="zgroup">
 <legend>Brush</legend>
@@ -196,13 +210,6 @@ MOTION = Template("""<h1>Motion detection</h1>
 <button type="button" class="segbtn" data-brush="2" aria-pressed="false">2&times;</button>
 <button type="button" class="segbtn" data-brush="3" aria-pressed="false">3&times;</button>
 </div>
-</fieldset>
-</section>
-<details class="zonecontrols" id="zone-secondary" open>
-<summary>More controls &mdash; sensitivity, zoom &amp; bulk</summary>
-<fieldset class="zgroup">
-<legend>Live picture</legend>
-<label class="ztoggle"><input type="checkbox" id="motion-highlight"> Show armed areas on the live picture</label>
 </fieldset>
 <fieldset class="zgroup">
 <legend>Sensitivity</legend>
@@ -221,24 +228,25 @@ MOTION = Template("""<h1>Motion detection</h1>
 <span class="muted" id="zoom-readout">Fit</span>
 </div>
 </fieldset>
+</aside>
+</section>
+<details class="zonecontrols" id="zone-secondary" open>
+<summary>More controls &mdash; live overlay, bulk &amp; shortcuts</summary>
+<fieldset class="zgroup">
+<legend>Live picture</legend>
+<label class="ztoggle"><input type="checkbox" id="motion-highlight"> Show armed areas on the live picture</label>
+</fieldset>
 <fieldset class="zgroup">
 <legend>Bulk</legend>
 <div class="bulkrow">
 <button type="button" class="copybtn" id="arm-all">Arm all</button>
 <button type="button" class="copybtn" id="mask-all">Mask all</button>
 <button type="button" class="copybtn" id="invert-all">Invert</button>
-<button type="button" class="copybtn" id="undo" disabled>Undo</button>
-<button type="button" class="copybtn" id="redo" disabled>Redo</button>
 <button type="button" class="copybtn" id="toggle-photo">Hide photo</button>
 </div>
 </fieldset>
 <p class="honest">Keys: a / m tool &middot; i invert &middot; + / &minus; / 0 zoom &middot; Ctrl+Z / Ctrl+Shift+Z undo/redo &middot; arrows + Space on the grid.</p>
 </details>
-<p class="muted warnnote" id="motion-warn" hidden></p>
-<p class="zoneprimary">
-<button type="button" id="motion-apply" class="searchbtn">Apply to camera</button>
-<button type="button" id="motion-discard" class="copybtn" hidden>Discard changes</button>
-</p>
 <section class="zonecoarse">
 <h2>Quick zones</h2>
 <div class="zonecoarsemap" id="zone-coarse" role="group" aria-label="Quick zones, 2 columns by 6 rows"></div>
