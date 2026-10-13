@@ -10,6 +10,7 @@ An idle reaper kills sessions nobody has polled recently and deletes their files
 
 import hashlib
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -182,19 +183,68 @@ def _play_cmd(from_cam: str, to_cam: str, directory: Path, transcode: bool) -> l
             str(directory / "seg_%05d.ts"),
             str(directory / "index.m3u8"),
         ]
+    return (
+        _ffmpeg_base()
+        + _tls_input_options()
+        + ["-i", _playback_rtsp_url(from_cam, to_cam)]
+        + _hls_out(directory, live=False, transcode=transcode)
+    )
+
+
+def _playback_rtsp_url(from_cam: str, to_cam: str) -> str:
+    """The credentialled RTSP URL for a recording window on track 101.
+
+    One source of truth for the camera's playback track: the /play HLS session
+    and the download fallback both drive it, and the camera admits only one such
+    session at a time.
+    """
     from urllib.parse import quote
 
     creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
     q = quote(f"starttime={from_cam}&endtime={to_cam}", safe="=&")
     return (
+        f"{config.RTSP_SCHEME}://{creds}{config.CAM_HOST}:{config.RTSP_PORT}"
+        f"/Streaming/tracks/101?{q}"
+    )
+
+
+def _download_container_flags() -> list[str]:
+    """Fragmented MP4 onto stdout: moov up front, one fragment per keyframe.
+
+    Fragmented MP4 is the container browsers and ordinary players all open, and
+    ``empty_moov`` writes the header before the first sample, so the file stays
+    valid while it is still being written (a plain MP4 muxer leaves the moov at
+    the end and yields an unplayable file until ffmpeg finishes).
+    """
+    return ["-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"]
+
+
+def _download_cmd(from_cam: str, to_cam: str) -> list[str]:
+    """ffmpeg command for the RTSP-playback download fallback (fragmented MP4)."""
+    if config.MOCK:
+        return [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=15",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-t",
+            "5",
+            *_download_container_flags(),
+        ]
+    return (
         _ffmpeg_base()
         + _tls_input_options()
-        + [
-            "-i",
-            f"{config.RTSP_SCHEME}://{creds}{config.CAM_HOST}:{config.RTSP_PORT}"
-            f"/Streaming/tracks/101?{q}",
-        ]
-        + _hls_out(directory, live=False, transcode=transcode)
+        + ["-i", _playback_rtsp_url(from_cam, to_cam), "-c", "copy", "-an"]
+        + _download_container_flags()
     )
 
 
@@ -220,7 +270,9 @@ def _kill_orphans(directory: Path) -> None:
         pass  # no pkill here; the watchdog covers orphan cleanup
 
 
-def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> Session:
+def _spawn(
+    kind: str, key: str, cmd: list[str], directory: Path, stdout: int = subprocess.DEVNULL
+) -> Session:
     """Spawn ffmpeg under a watchdog shell.
 
     The watchdog supervises ffmpeg:
@@ -248,9 +300,7 @@ def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> Session:
     return {
         "kind": kind,
         "key": key,
-        "proc": subprocess.Popen(
-            wrapped, stdout=subprocess.DEVNULL, stderr=err_log, start_new_session=True
-        ),
+        "proc": subprocess.Popen(wrapped, stdout=stdout, stderr=err_log, start_new_session=True),
         "dir": directory,
         "err_log": err_log,
         "last_access": time.monotonic(),
@@ -346,6 +396,134 @@ def session_dir(key: str) -> Path | None:
     with _sessions_lock:
         session = _sessions.get(key)
         return session["dir"] if session else None
+
+
+def download_key(from_cam: str, to_cam: str) -> str:
+    digest = hashlib.md5(f"dl-{from_cam}-{to_cam}".encode()).hexdigest()[:10]
+    return f"download-{digest}"
+
+
+def playback_holder() -> str | None:
+    """Which live session holds the camera's single playback slot, if any.
+
+    /play and the download fallback both drive /Streaming/tracks/101, and the
+    camera admits one such session: 'play' or 'download', else None.
+    """
+    with _sessions_lock:
+        for key, session in _sessions.items():
+            if session["proc"].poll() is not None:
+                continue
+            if key.startswith("play-"):
+                return "play"
+            if key.startswith("download-"):
+                return "download"
+    return None
+
+
+def ensure_download(from_cam: str, to_cam: str) -> Session:
+    """Start (or reuse) the one-shot remux session behind a download fallback.
+
+    ffmpeg writes a fragmented MP4 to stdout; the caller relays it with
+    iter_download and must call stop_download when done. Tracked in _sessions so
+    the parent watchdog, group kill and idle reaper cover it exactly like an HLS
+    session -- the fallback never spawns a bare ffmpeg.
+    """
+    key = download_key(from_cam, to_cam)
+    with _sessions_lock:
+        session = _sessions.get(key)
+        if session and session["proc"].poll() is None:
+            session["last_access"] = time.monotonic()
+            return session
+        if session:
+            shutil.rmtree(session["dir"], ignore_errors=True)
+        directory = HLS_ROOT / key
+        _kill_orphans(directory)
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True, exist_ok=True)
+        session = _spawn(
+            "download", key, _download_cmd(from_cam, to_cam), directory, stdout=subprocess.PIPE
+        )
+        _sessions[key] = session
+        _ensure_reaper()
+        return session
+
+
+def stop_download(key: str) -> bool:
+    """Stop and forget a download session (viewer gone or the relay finished).
+
+    The stdout pipe is closed here, after the caller is done reading it: closing
+    it in _kill would race the idle reaper against an in-flight relay and could
+    truncate the file the client is still receiving.
+    """
+    with _sessions_lock:
+        session = _sessions.pop(key, None)
+    if not session:
+        return False
+    _kill(session)
+    stdout = session["proc"].stdout
+    if stdout is not None:
+        try:
+            stdout.close()
+        except OSError, ValueError:
+            pass
+    shutil.rmtree(session["dir"], ignore_errors=True)
+    return True
+
+
+def touch_download(key: str) -> bool:
+    """Mark a download session as used so the idle reaper leaves it alone."""
+    with _sessions_lock:
+        session = _sessions.get(key)
+        if session is None:
+            return False
+        session["last_access"] = time.monotonic()
+        return True
+
+
+def download_error_text(session: Session) -> str:
+    """ffmpeg's stderr for a download session ('' when the log is unavailable)."""
+    try:
+        return (session["dir"] / "ffmpeg-stderr.log").read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+DOWNLOAD_CHUNK = 64 * 1024
+# Give up relaying when ffmpeg has produced nothing for this long: a hung RTSP
+# connection must not pin the request thread (the reaper is the slower backstop).
+DOWNLOAD_STALL_S = 25.0
+
+
+def iter_download(session: Session, chunk_size: int = DOWNLOAD_CHUNK) -> Iterator[bytes]:
+    """Yield a download session's remuxed bytes as ffmpeg writes them.
+
+    Reads at the file-descriptor level so each fragment reaches the client as
+    soon as it exists (no buffered read-ahead), yields nothing once ffmpeg
+    exits, and stops after DOWNLOAD_STALL_S without output. The caller owns the
+    session lifetime and must stop_download when done.
+    """
+    stream = session["proc"].stdout
+    if stream is None:
+        return
+    fd = stream.fileno()
+    last = time.monotonic()
+    while True:
+        try:
+            ready, _, _ = select.select([fd], [], [], 0.5)
+        except OSError, ValueError:
+            return
+        if not ready:
+            if time.monotonic() - last > DOWNLOAD_STALL_S:
+                return
+            continue
+        try:
+            data = os.read(fd, chunk_size)
+        except OSError, ValueError:
+            return
+        if not data:
+            return
+        last = time.monotonic()
+        yield data
 
 
 def kill_all() -> None:

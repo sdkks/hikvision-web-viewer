@@ -1038,17 +1038,22 @@ class ViewerApp:
         handler.wfile.write(body)
 
     def route_download(self, handler: Any, query: dict[str, list[str]]) -> None:
-        """Relay a recorded file from the camera's ISAPI download endpoint.
+        """Relay a recorded clip: the camera's own ISAPI file, else its RTSP playback track.
 
         The picker link carries the clip window plus the camera's own file name
         and size, so the playback URI is rebuilt here from those fields — the
         same shape /play constructs for RTSP (viewer/streams.py) and the same
         shape as Clip.uri_escaped. A camera search per download is deliberately
         avoided: it adds latency and depends on the search service this firmware
-        is known to drop. The camera ignores a narrowed window and streams the
-        whole stored file containing it, so neither the page nor the filename
-        promises a trimmed export — the filename names the window that was asked
-        for, not a video that was cut to it.
+        is known to drop.
+
+        The ISAPI export is tried first and, when it works, its bytes and their
+        sniffed container are relayed unchanged. When it refuses (this firmware
+        answers ContentMgmt/download with 400 Invalid XML Content for every URI
+        while the recording itself is fine) or sends nothing, the fallback
+        remuxes the RTSP playback track into a fragmented MP4. Each path names
+        the file for the bytes it actually sends: the ISAPI bytes are the
+        camera's whole stored file, the fallback is the requested window.
         """
         from_cam = (query.get("from", [""])[0] or "").strip()
         to_cam = (query.get("to", [""])[0] or "").strip()
@@ -1084,6 +1089,19 @@ class ViewerApp:
             retry_q += f"&amp;size={size_raw}"
         retry_href = f"/download?{retry_q}"
 
+        if not self._download_isapi(handler, uri_escaped, from_cam, to_cam, retry_href):
+            self._download_fallback(handler, from_cam, to_cam, retry_href)
+
+    def _download_isapi(
+        self, handler: Any, uri_escaped: str, from_cam: str, to_cam: str, retry_href: str
+    ) -> bool:
+        """Relay the camera's own stored file via ISAPI ContentMgmt/download.
+
+        Returns True when the request was handled here: either the file was
+        relayed byte-for-byte, or a terminal typed card (credentials, unreachable,
+        bad reply) was rendered. Returns False when the export refused or sent
+        nothing, which is the caller's signal to fall back to the playback track.
+        """
         try:
             response = (
                 streams.mock_download_response()
@@ -1097,7 +1115,7 @@ class ViewerApp:
                 "Fix the credentials and try the download again.",
                 code=502,
             )
-            return
+            return True
         except camera.UnreachableError as exc:
             self._download_error(
                 handler,
@@ -1106,26 +1124,22 @@ class ViewerApp:
                 retry_href=retry_href,
                 code=502,
             )
-            return
+            return True
         except camera.CameraError:
-            self._download_error(
-                handler,
-                "The camera's download service isn't responding.",
-                "Live view and playback may still work — try the download again in a moment.",
-                retry_href=retry_href,
-                code=503,
-            )
-            return
+            # The export refused (this firmware answers the documented download
+            # request with 400 Invalid XML Content). The recording is still on
+            # the card, so the RTSP playback track is worth trying.
+            return False
 
         # Sniff the container's first bytes before any header goes out: the bytes
         # decide both the Content-Type and the extension. The first chunk is held
         # back and written after the headers, then the rest of the stream is
         # relayed unchanged -- the file is never buffered whole.
         #
-        # A reply that yields no bytes at all (the mock encoder failing, or a real
-        # camera answering 200 with an empty file) is a bad reply, not a good
-        # empty download: catch it here, before any status is committed, and
-        # answer a typed error card instead of a successful-looking 0-byte file.
+        # An empty reply (a real camera answering 200 with no bytes) is the
+        # export yielding nothing: another fall-back signal. A mock encoder
+        # failure is a local fault, not a camera refusal, so it keeps its typed
+        # card with ffmpeg's stderr instead of retrying the same encoder.
         try:
             try:
                 stream = response.iter_content(DOWNLOAD_CHUNK)
@@ -1138,19 +1152,12 @@ class ViewerApp:
                     retry_href=retry_href,
                     code=502,
                 )
-                return
+                return True
             except BrokenPipeError, ConnectionResetError, TimeoutError:
-                return  # the browser cancelled or vanished mid-download; nothing to report
+                return True  # the browser cancelled or vanished mid-download
 
             if not first:
-                self._download_error(
-                    handler,
-                    "The camera returned no data for that range.",
-                    "The download service answered but sent an empty file.",
-                    retry_href=retry_href,
-                    code=502,
-                )
-                return
+                return False
 
             content_type, extension = sniff_download_container(first)
             filename = f"clip_{from_cam}_{to_cam}.{extension}"
@@ -1167,11 +1174,90 @@ class ViewerApp:
                         handler.wfile.write(chunk)
             except BrokenPipeError, ConnectionResetError, TimeoutError:
                 pass  # the browser cancelled or vanished mid-download; nothing to report
+            return True
         finally:
             try:
                 response.close()
             except Exception:
                 pass
+
+    def _download_fallback(self, handler: Any, from_cam: str, to_cam: str, retry_href: str) -> None:
+        """Remux the RTSP playback track when the ISAPI export refuses.
+
+        The camera serves the recording over its playback track at realtime;
+        ffmpeg copies it into a fragmented MP4. That track is the camera's single
+        playback session, so an already-running playback (or another download) is
+        refused with a clear message rather than silently preempted.
+        """
+        holder = streams.playback_holder()
+        if holder == "play":
+            self._download_error(
+                handler,
+                "Playback is using the camera's single playback session.",
+                "Stop playback, then start the download again.",
+                retry_href=retry_href,
+                code=409,
+            )
+            return
+        if holder == "download":
+            self._download_error(
+                handler,
+                "A download is already using the camera's playback session.",
+                "Wait for it to finish, then try again.",
+                retry_href=retry_href,
+                code=409,
+            )
+            return
+        try:
+            session = streams.ensure_download(from_cam, to_cam)
+        except OSError:
+            self._download_error(
+                handler,
+                "The camera's download service isn't responding.",
+                "Live view and playback may still work — try the download again in a moment.",
+                retry_href=retry_href,
+                code=503,
+            )
+            return
+        key = session["key"]
+        try:
+            chunks = streams.iter_download(session)
+            first = next((chunk for chunk in chunks if chunk), b"")
+            if not first:
+                detail = streams.download_error_text(session)
+                if "401" in detail or "Unauthorized" in detail:
+                    self._download_error(
+                        handler,
+                        CREDENTIALS_REFUSED,
+                        "Fix the credentials and try the download again.",
+                        retry_href=retry_href,
+                        code=502,
+                    )
+                else:
+                    self._download_error(
+                        handler,
+                        "The camera returned no data for that range.",
+                        "The playback stream could not be remuxed from the camera.",
+                        retry_href=retry_href,
+                        code=502,
+                    )
+                return
+            filename = f"clip_{from_cam}_{to_cam}.mp4"
+            try:
+                handler.send_response(200)
+                handler.send_header("Content-Type", "video/mp4")
+                handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                handler.send_header("Cache-Control", "no-store")
+                handler.send_header("Connection", "close")
+                handler.end_headers()
+                handler.wfile.write(first)
+                for chunk in chunks:
+                    handler.wfile.write(chunk)
+                    streams.touch_download(key)
+            except BrokenPipeError, ConnectionResetError, TimeoutError:
+                pass  # the browser cancelled or vanished; the finally stops ffmpeg
+        finally:
+            streams.stop_download(key)
 
     def _download_error(
         self, handler: Any, message: str, detail: str, retry_href: str = "", code: int = 502

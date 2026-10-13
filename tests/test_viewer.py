@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import IO, Any, TypedDict, cast
 from unittest import mock
 
 import urllib3
@@ -715,6 +715,13 @@ class _FakeBodyHandler:
         pass
 
 
+class _BrokenWFile:
+    """A response sink whose client vanished: every write fails."""
+
+    def write(self, data: bytes) -> int:
+        raise BrokenPipeError("client gone")
+
+
 class CredentialsSurfaceTests(unittest.TestCase):
     """The credentials message reaches every page that surfaces camera failures."""
 
@@ -1340,6 +1347,47 @@ class DownloadRouteTests(unittest.TestCase):
         app.cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
         return app
 
+    SESSION_KEY = "download-test"
+
+    def _stub_fallback(
+        self,
+        chunks: list[bytes],
+        *,
+        holder: str | None = None,
+        ensure_error: Exception | None = None,
+        stderr: str = "",
+    ) -> mock.Mock:
+        """Patch the download-session seam; return the stop_download mock.
+
+        Keeps these route tests off a real ffmpeg: the relay is exercised against
+        an injectable session and pipe, while the session machinery itself is
+        covered directly below.
+        """
+        session: streams.Session = {
+            "kind": "download",
+            "key": self.SESSION_KEY,
+            "proc": cast("subprocess.Popen[bytes]", mock.Mock()),
+            "dir": Path("/tmp/download-test"),
+            "err_log": cast("IO[bytes]", mock.Mock()),
+            "last_access": 0.0,
+            "started": 0.0,
+        }
+        stop = mock.Mock(return_value=True)
+        self.enterContext(mock.patch.object(streams, "playback_holder", return_value=holder))
+        self.enterContext(mock.patch.object(streams, "touch_download", return_value=True))
+        self.enterContext(mock.patch.object(streams, "stop_download", stop))
+        self.enterContext(mock.patch.object(streams, "download_error_text", return_value=stderr))
+        if ensure_error is not None:
+            self.enterContext(
+                mock.patch.object(streams, "ensure_download", side_effect=ensure_error)
+            )
+        else:
+            self.enterContext(mock.patch.object(streams, "ensure_download", return_value=session))
+            self.enterContext(
+                mock.patch.object(streams, "iter_download", return_value=iter(chunks))
+            )
+        return stop
+
     def test_bad_clip_parameters_are_a_typed_400(self) -> None:
         handler = _FakeBodyHandler({})
         self._app().route_download(handler, {"from": ["nope"], "to": ["nope"]})
@@ -1435,7 +1483,7 @@ class DownloadRouteTests(unittest.TestCase):
 
         def fake_download(uri: str) -> DownloadRouteTests._FakeDownload:
             captured["uri"] = uri
-            return self._FakeDownload([])
+            return self._FakeDownload([b"\x00\x00\x00\x18ftypmp42"])
 
         self.enterContext(mock.patch.object(app.cam, "download_stream", fake_download))
         # A name the camera could never report must never reach the XML body.
@@ -1458,13 +1506,16 @@ class DownloadRouteTests(unittest.TestCase):
         self.assertIn("refused the viewer", body)
         self.assertNotIn("Traceback", body)
 
-    def test_service_down_offers_a_retry(self) -> None:
+    def test_fallback_start_failure_offers_a_retry(self) -> None:
+        # The export refuses and the fallback cannot even start its encoder: the
+        # service-down card and its Retry must survive.
         app = self._app()
         self.enterContext(
             mock.patch.object(
                 app.cam, "download_stream", side_effect=camera.ServiceDownError("boom")
             )
         )
+        self._stub_fallback([], ensure_error=OSError("no ffmpeg"))
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 503)
@@ -1539,19 +1590,255 @@ class DownloadRouteTests(unittest.TestCase):
             'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
         )
 
-    def test_empty_camera_reply_is_a_typed_error_not_an_empty_200(self) -> None:
-        # A real camera that answers 200 with no bytes is a bad reply, not a
-        # successful empty download. It must be typed and offer a Retry.
+    def test_refusing_export_falls_back_to_a_remuxed_mp4(self) -> None:
+        # The device answers the ISAPI export with 400 while the recording is
+        # fine: the fallback remuxes the playback track and names the file for
+        # the bytes it sends, not for the camera's native container.
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        body = b"\x00\x00\x00\x18ftypmp42" + bytes(range(32))
+        stop = self._stub_fallback([body])
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.wfile.getvalue(), body)
+        self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
+        self.assertEqual(
+            handler.response_headers["Content-Disposition"],
+            'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
+        )
+        stop.assert_called_once_with(self.SESSION_KEY)
+
+    def test_empty_export_falls_back_to_the_playback_track(self) -> None:
+        # A camera answering 200 with no bytes is the export yielding nothing, so
+        # it falls back too -- not a successful empty 0-byte download.
         app = self._app()
         self.enterContext(
             mock.patch.object(app.cam, "download_stream", lambda uri: self._FakeDownload([]))
         )
+        stop = self._stub_fallback([b"\x00\x00\x00\x18ftypmp42" + bytes(range(16))])
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
+        stop.assert_called_once_with(self.SESSION_KEY)
+
+    def test_fallback_with_no_data_is_a_typed_card(self) -> None:
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        stop = self._stub_fallback([])
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 502)
         body = handler.wfile.getvalue().decode()
         self.assertIn("no data", body)
         self.assertIn("/download?from=20261012T194808Z", body)
+        stop.assert_called_once_with(self.SESSION_KEY)
+
+    def test_fallback_rtsp_401_names_the_credentials(self) -> None:
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        self._stub_fallback([], stderr="[rtsp @ 0x1] method OPTIONS failed: 401 Unauthorized")
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 502)
+        self.assertIn("refused the viewer", handler.wfile.getvalue().decode())
+
+    def test_running_playback_refuses_the_fallback(self) -> None:
+        # The playback track is the camera's single playback session: a running
+        # playback must be named, never silently preempted.
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        stop = self._stub_fallback([], holder="play")
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 409)
+        self.assertIn("Stop playback", handler.wfile.getvalue().decode())
+        stop.assert_not_called()
+
+    def test_concurrent_download_refuses_the_fallback(self) -> None:
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        stop = self._stub_fallback([], holder="download")
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 409)
+        self.assertIn("already", handler.wfile.getvalue().decode())
+        stop.assert_not_called()
+
+    def test_client_going_away_mid_fallback_stops_the_session(self) -> None:
+        # A vanished client must not leave ffmpeg behind: the relay's finally
+        # stops the tracked session (watchdog + group kill), not just the pipe.
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        stop = self._stub_fallback([b"\x00\x00\x00\x18ftypmp42" + bytes(range(8))])
+        handler = _FakeBodyHandler({})
+        handler.wfile = cast("io.BytesIO", _BrokenWFile())
+        app.route_download(handler, self.WINDOW)
+        stop.assert_called_once_with(self.SESSION_KEY)
+
+
+class DownloadCommandTests(unittest.TestCase):
+    """The fallback ffmpeg command: copy the playback track to a fragmented MP4."""
+
+    def test_mock_command_is_a_fragmented_mp4_on_stdout(self) -> None:
+        with mock.patch.object(config, "MOCK", True):
+            cmd = streams._download_cmd("20261012T194808Z", "20261012T201036Z")
+        self.assertEqual(cmd[-2:], ["mp4", "pipe:1"])
+        self.assertIn("frag_keyframe+empty_moov+default_base_moof", cmd)
+        self.assertNotIn("copy", cmd)  # mock re-encodes; the real path copies
+
+    def test_real_command_copies_the_playback_track_to_stdout(self) -> None:
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=False,
+            CAM_RTSP_TLS=False,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsp",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=554,
+        ):
+            cmd = streams._download_cmd("20261012T194808Z", "20261012T201036Z")
+        self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+        self.assertEqual(cmd[-2:], ["mp4", "pipe:1"])
+        self.assertEqual(
+            cmd[cmd.index("-i") + 1],
+            "rtsp://u:p@cam:554/Streaming/tracks/101"
+            "?starttime=20261012T194808Z&endtime=20261012T201036Z",
+        )
+
+    def test_real_command_uses_rtsps_when_rtsp_tls_is_on(self) -> None:
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=True,
+            CAM_RTSP_TLS=True,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsps",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=322,
+        ):
+            cmd = streams._download_cmd("a", "b")
+        self.assertIn("rtsps://u:p@cam:322/Streaming/tracks/101", cmd[cmd.index("-i") + 1])
+        self.assertLess(cmd.index("-tls_verify"), cmd.index("-i"))
+
+    def test_play_and_download_share_the_playback_url(self) -> None:
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=False,
+            CAM_RTSP_TLS=False,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsp",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=554,
+        ):
+            play = streams._play_cmd("20261012T194808Z", "20261012T201036Z", Path("/tmp/x"), True)
+            download = streams._download_cmd("20261012T194808Z", "20261012T201036Z")
+        self.assertEqual(play[play.index("-i") + 1], download[download.index("-i") + 1])
+
+
+class PlaybackHolderTests(unittest.TestCase):
+    """Only one session may hold the camera's single playback slot at a time."""
+
+    def _session(self, key: str, *, alive: bool = True) -> dict[str, Any]:
+        proc = mock.Mock()
+        proc.poll.return_value = None if alive else 1
+        return {"kind": "x", "key": key, "proc": proc}
+
+    def test_reports_playback_download_or_none(self) -> None:
+        with mock.patch.object(streams, "_sessions", {"play-abc": self._session("play-abc")}):
+            self.assertEqual(streams.playback_holder(), "play")
+        with mock.patch.object(
+            streams, "_sessions", {"download-abc": self._session("download-abc")}
+        ):
+            self.assertEqual(streams.playback_holder(), "download")
+        with mock.patch.object(streams, "_sessions", {"live-101": self._session("live-101")}):
+            self.assertIsNone(streams.playback_holder())
+
+    def test_a_dead_session_does_not_hold_the_slot(self) -> None:
+        with mock.patch.object(
+            streams, "_sessions", {"play-dead": self._session("play-dead", alive=False)}
+        ):
+            self.assertIsNone(streams.playback_holder())
+
+
+class DownloadSessionTests(unittest.TestCase):
+    """The fallback remux runs under the tracked session machinery, not a bare Popen."""
+
+    def test_ensure_download_uses_the_watchdog_with_a_pipe(self) -> None:
+        fake = mock.Mock()
+        fake.poll.return_value = None
+        fake.stdout = mock.Mock()
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        sessions: dict[str, streams.Session] = {}
+        with (
+            mock.patch.object(streams, "HLS_ROOT", Path(tmp)),
+            mock.patch.object(streams, "_kill_orphans"),
+            mock.patch.object(streams, "_ensure_reaper"),
+            mock.patch.object(config, "MOCK", False),
+            mock.patch.object(subprocess, "Popen", return_value=fake) as popen,
+            mock.patch.object(streams, "_sessions", sessions),
+        ):
+            with mock.patch.multiple(
+                config,
+                CAM_TLS=False,
+                CAM_RTSP_TLS=False,
+                RTSP_SCHEME="rtsp",
+                CAM_HOST="cam",
+                CAM_USER="u",
+                CAM_PASS="p",
+                RTSP_PORT=554,
+            ):
+                session = streams.ensure_download("20261012T194808Z", "20261012T201036Z")
+            session["err_log"].close()
+        self.assertEqual(session["kind"], "download")
+        self.assertTrue(session["key"].startswith("download-"))
+        self.assertIn(session["key"], sessions)
+        args, kwargs = popen.call_args
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertTrue(kwargs["start_new_session"])
+        command = args[0]
+        self.assertEqual(command[0], "/bin/sh")  # the watchdog wraps ffmpeg
+        copy_at = command.index("copy")
+        self.assertEqual(command[copy_at - 1], "-c")
+        self.assertEqual(command[-2:], ["mp4", "pipe:1"])
+        self.assertEqual(
+            command[command.index("-i") + 1],
+            "rtsp://u:p@cam:554/Streaming/tracks/101"
+            "?starttime=20261012T194808Z&endtime=20261012T201036Z",
+        )
 
 
 class ConfigFileTests(unittest.TestCase):
