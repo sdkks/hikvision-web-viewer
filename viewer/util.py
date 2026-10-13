@@ -8,6 +8,10 @@ CAM_FMT = "%Y%m%dT%H%M%SZ"
 SEARCH_OUT_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _DT_LOCAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$")
 _CAM_RE = re.compile(r"^\d{8}T\d{6}Z$")
+# A URL's userinfo. ffmpeg echoes the input URL it could not open, and this
+# project's RTSP URLs carry the camera credentials, so ffmpeg's own words have to
+# pass through this before a person reads them.
+_URL_USERINFO_RE = re.compile(r"(?P<scheme>rtsps?|https?)://[^/\s]*@")
 
 
 def parse_cam_time(value: str) -> datetime:
@@ -68,6 +72,18 @@ def human_size(num_bytes: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
     return f"{value:.1f} GB"
+
+
+def redact_url_credentials(text: str) -> str:
+    """Replace URL userinfo with ``***:***`` so error text can be shown safely.
+
+    The substitution keeps the scheme and host, which is what makes the message
+    useful, and drops only the credentials. A path that merely contains ``@`` is
+    left alone: userinfo cannot contain ``/``, so the match stops at the first
+    one, and a password that itself contains ``@`` is covered because the match
+    runs to the last ``@`` before the path.
+    """
+    return _URL_USERINFO_RE.sub(r"\g<scheme>://***:***@", text)
 
 
 def normalize_playback_uri(uri: str, rtsp_base: str, unescape: bool = True) -> str:

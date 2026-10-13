@@ -1298,7 +1298,7 @@ class ViewerApp:
             handler,
             "Download",
             f"<div class='errcard'><p>{esc(message)}</p>"
-            f"<p class='muted'>{esc(detail)}</p>{retry}</div>",
+            f"<p class='muted'>{esc(util.redact_url_credentials(detail))}</p>{retry}</div>",
             nav="recordings",
             code=code,
         )

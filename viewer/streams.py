@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, TypedDict
 
-from . import camera, config
+from . import camera, config, util
 
 HLS_ROOT = Path(tempfile.gettempdir()) / f"hikvision-viewer-hls-{config.BIND_PORT}"
 LIVE_IDLE_S = 90
@@ -481,11 +481,17 @@ def touch_download(key: str) -> bool:
 
 
 def download_error_text(session: Session) -> str:
-    """ffmpeg's stderr for a download session ('' when the log is unavailable)."""
+    """ffmpeg's stderr for a download session ('' when the log is unavailable).
+
+    Redacted before it leaves here: ffmpeg echoes the input URL it failed on, and
+    that URL carries the camera credentials while this text is rendered on the
+    error card a person reads.
+    """
     try:
-        return (session["dir"] / "ffmpeg-stderr.log").read_text(errors="replace")
+        raw = (session["dir"] / "ffmpeg-stderr.log").read_text(errors="replace")
     except OSError:
         return ""
+    return util.redact_url_credentials(raw)
 
 
 DOWNLOAD_CHUNK = 64 * 1024

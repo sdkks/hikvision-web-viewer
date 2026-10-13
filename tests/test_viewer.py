@@ -1710,6 +1710,31 @@ class DownloadRouteTests(unittest.TestCase):
         self.assertNotIn("Content-Disposition", handler.response_headers)
         stop.assert_called_once_with(self.SESSION_KEY)
 
+    def test_the_error_card_never_shows_the_camera_password(self) -> None:
+        # ffmpeg echoes the input URL it failed on, and that URL carries the camera
+        # credentials, so a raw stderr tail would put the password on the page.
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        stop = self._stub_fallback(
+            [FMP4_INIT],
+            stderr=(
+                "Error opening input file rtsp://admin:Barge7-Conduit@192.168.0.156:554"
+                "/Streaming/tracks/101?starttime=20261013T131237Z."
+            ),
+        )
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        body = handler.wfile.getvalue().decode()
+        self.assertEqual(handler.status, 502)
+        self.assertNotIn("Barge7-Conduit", body)
+        self.assertNotIn("admin", body)
+        self.assertIn("rtsp://***:***@192.168.0.156:554/Streaming/tracks/101", body)
+        stop.assert_called_once_with(self.SESSION_KEY)
+
     def test_fallback_encoder_failure_without_media_is_a_typed_card(self) -> None:
         # ffmpeg exits non-zero having produced nothing: the card names its stderr
         # rather than answering 200 with an empty attachment.
@@ -2505,6 +2530,52 @@ class PlaybackUriSchemeTests(unittest.TestCase):
             util.normalize_playback_uri(uri, "rtsp://cam:554"),
             "rtsp://cam:554/Streaming/tracks/101?starttime=x",
         )
+
+
+class RedactUrlCredentialsTests(unittest.TestCase):
+    def test_hides_a_password_and_user_in_an_rtsp_url(self) -> None:
+        out = util.redact_url_credentials(
+            "Error opening input file rtsp://admin:secret@192.168.0.156:554/tracks/101."
+        )
+        self.assertNotIn("secret", out)
+        self.assertNotIn("admin", out)
+        self.assertIn("rtsp://***:***@192.168.0.156:554/tracks/101", out)
+
+    def test_covers_rtsps_and_http_and_a_password_containing_an_at(self) -> None:
+        for url in ("rtsps://a:b@h:322/x", "https://a:b@h/x", "rtsp://a:p@ss@h:554/x"):
+            out = util.redact_url_credentials(f"failed: {url}")
+            self.assertIn("***:***@", out)
+            self.assertNotIn("b@", out)
+            self.assertNotIn("p@ss", out)
+
+    def test_leaves_text_without_credentials_alone(self) -> None:
+        for text in (
+            "method DESCRIBE failed: 500 (Internal Server Error)",
+            "rtsp://192.168.0.156:554/Streaming/tracks/101?starttime=x",
+            "a path that merely has @ in it: rtsp://h:554/x@y",
+            "no url at all",
+        ):
+            self.assertEqual(util.redact_url_credentials(text), text)
+
+    def test_redacts_every_url_not_only_the_first(self) -> None:
+        out = util.redact_url_credentials("rtsp://u1:p1@h1/x and rtsp://u2:p2@h2/y")
+        self.assertEqual(out.count("***:***@"), 2)
+        self.assertNotIn("p1", out)
+        self.assertNotIn("p2", out)
+
+    def test_the_session_log_reader_redacts_before_it_returns(self) -> None:
+        # The reader is the source seam: whatever calls it gets safe text, so a
+        # future caller cannot render the password by forgetting to redact.
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "ffmpeg-stderr.log").write_text(
+                "Error opening input file rtsp://admin:secret@192.168.0.156:554/x"
+            )
+            session = cast("streams.Session", {"dir": directory})
+            text = streams.download_error_text(session)
+        self.assertNotIn("secret", text)
+        self.assertNotIn("admin", text)
+        self.assertIn("rtsp://***:***@192.168.0.156:554/x", text)
 
 
 if __name__ == "__main__":
