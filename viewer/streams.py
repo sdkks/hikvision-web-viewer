@@ -1,42 +1,39 @@
-"""ffmpeg session manager.
+"""ffmpeg HLS session manager.
 
-Serves fragmented-MP4 live streams and live-tempo clip playback by piping ffmpeg
-stdout into the HTTP response. Enforces the camera's one-playback-session limit by
-killing any previous playback process when a new one starts.
+Every session transcodes the camera's HEVC to H.264 (browsers cannot MSE-decode
+HEVC reliably; H.264 plays everywhere) and writes an HLS playlist + MPEG-TS
+segments into a per-session directory. One session per live channel, one for
+playback (the camera enforces a single playback session itself).
 
-All ffmpeg invocations are read-only against the camera.
+An idle reaper kills sessions nobody has polled recently and deletes their files.
 """
 
+import hashlib
+import shutil
 import subprocess
+import tempfile
 import threading
+import time
+from pathlib import Path
 
 from . import config
 
-CHUNK = 65536
-STARTUP_TIMEOUT_S = 12.0
+HLS_ROOT = Path(tempfile.gettempdir()) / f"hikvision-viewer-hls-{config.BIND_PORT}"
+LIVE_IDLE_S = 120
+PLAY_IDLE_S = 900
 
-_live_lock = threading.Lock()
-_playback_lock = threading.Lock()
-_live_procs: dict[str, subprocess.Popen] = {}
-_playback_proc: subprocess.Popen | None = None
+_sessions: dict[str, dict] = {}
+_sessions_lock = threading.Lock()
+_reaper_lock = threading.Lock()
+_reaper_started = False
 
 
 def _ffmpeg_base() -> list[str]:
     return ["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp"]
 
 
-def _fmp4_out() -> list[str]:
-    return [
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof",
-        "-f",
-        "mp4",
-        "pipe:1",
-    ]
-
-
-def _transcode_out() -> list[str]:
-    """HEVC -> H.264 on the fly, for browsers without HEVC decode. Video only (camera serves no audio)."""
+def _hls_out(directory: Path, live: bool) -> list[str]:
+    flags = "delete_segments+independent_segments" if live else "independent_segments"
     return [
         "-c:v",
         "libx264",
@@ -46,89 +43,238 @@ def _transcode_out() -> list[str]:
         "25",
         "-pix_fmt",
         "yuv420p",
+        "-g",
+        "25",
         "-an",
-    ] + _fmp4_out()
-
-
-def _mock_live_cmd(channel: str, transcode: bool = False) -> list[str]:
-    size = "1280x720" if channel.endswith("1") else "640x360"
-    return [
-        "ffmpeg",
-        "-loglevel",
-        "error",
         "-f",
-        "lavfi",
-        "-i",
-        f"testsrc2=size={size}:rate=15",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-tune",
-        "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        "30",
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof",
-        "-f",
-        "mp4",
-        "pipe:1",
+        "hls",
+        "-hls_time",
+        "1" if live else "2",
+        "-hls_list_size",
+        "6" if live else "0",
+        "-hls_flags",
+        flags,
+        "-hls_segment_filename",
+        str(directory / "seg_%05d.ts"),
+        str(directory / "index.m3u8"),
     ]
 
 
-def _mock_playback_cmd(duration_s: int) -> list[str]:
-    duration = max(5, min(int(duration_s or 30), 600))
-    return [
-        "ffmpeg",
-        "-loglevel",
-        "error",
-        "-re",
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=size=640x360:rate=15",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-tune",
-        "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        "30",
-        "-t",
-        str(duration),
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof",
-        "-f",
-        "mp4",
-        "pipe:1",
-    ]
-
-
-def live_cmd(channel: str, transcode: bool = False) -> list[str]:
-    """ffmpeg command for an endless live stream of the given ISAPI channel."""
-    if config.MOCK:
-        return _mock_live_cmd(channel, transcode)
+def _camera_rtsp(channel: str) -> str:
     creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
-    source = f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/channels/{channel}"
-    out = _transcode_out() if transcode else ["-c", "copy"] + _fmp4_out()
-    return _ffmpeg_base() + ["-i", source] + out
+    return f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/channels/{channel}"
 
 
-def playback_cmd(rtsp_url: str, duration_s: int, transcode: bool = False) -> list[str]:
-    """ffmpeg command for a live-tempo playback of an archived clip window."""
+def _live_cmd(channel: str, directory: Path) -> list[str]:
     if config.MOCK:
-        return _mock_playback_cmd(duration_s)
-    out = _transcode_out() if transcode else ["-c", "copy"] + _fmp4_out()
-    return _ffmpeg_base() + ["-i", rtsp_url] + out
+        return [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1280x720:rate=15",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "30",
+            "-an",
+            "-f",
+            "hls",
+            "-hls_time",
+            "1",
+            "-hls_list_size",
+            "6",
+            "-hls_flags",
+            "delete_segments+independent_segments",
+            "-hls_segment_filename",
+            str(directory / "seg_%05d.ts"),
+            str(directory / "index.m3u8"),
+        ]
+    return _ffmpeg_base() + [
+        "-i",
+        _camera_rtsp(channel),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "25",
+        "-pix_fmt",
+        "yuv420p",
+        "-g",
+        "25",
+        "-an",
+        "-f",
+        "hls",
+        "-hls_time",
+        "1",
+        "-hls_list_size",
+        "6",
+        "-hls_flags",
+        "delete_segments+independent_segments",
+        "-hls_segment_filename",
+        str(directory / "seg_%05d.ts"),
+        str(directory / "index.m3u8"),
+    ]
 
 
-def _kill_locked(proc: subprocess.Popen | None) -> None:
-    if proc and proc.poll() is None:
+def _play_cmd(from_cam: str, to_cam: str, directory: Path) -> list[str]:
+    if config.MOCK:
+        return [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=15",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "30",
+            "-an",
+            "-t",
+            "120",
+            "-f",
+            "hls",
+            "-hls_time",
+            "2",
+            "-hls_list_size",
+            "0",
+            "-hls_flags",
+            "independent_segments",
+            "-hls_segment_filename",
+            str(directory / "seg_%05d.ts"),
+            str(directory / "index.m3u8"),
+        ]
+    from urllib.parse import quote
+
+    q = quote(f"starttime={from_cam}&endtime={to_cam}", safe="=&")
+    return _ffmpeg_base() + [
+        "-i",
+        f"rtsp://{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101?{q}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "25",
+        "-pix_fmt",
+        "yuv420p",
+        "-g",
+        "50",
+        "-an",
+        "-f",
+        "hls",
+        "-hls_time",
+        "2",
+        "-hls_list_size",
+        "0",
+        "-hls_flags",
+        "independent_segments",
+        "-hls_segment_filename",
+        str(directory / "seg_%05d.ts"),
+        str(directory / "index.m3u8"),
+    ]
+
+
+def live_key(channel: str) -> str:
+    return f"live-{channel}"
+
+
+def play_key(from_cam: str, to_cam: str) -> str:
+    digest = hashlib.md5(f"{from_cam}-{to_cam}".encode()).hexdigest()[:10]
+    return f"play-{digest}"
+
+
+def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> dict:
+    return {
+        "kind": kind,
+        "key": key,
+        "proc": subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+        "dir": directory,
+        "last_access": time.monotonic(),
+        "started": time.time(),
+    }
+
+
+def ensure_live(channel: str) -> dict:
+    """Start or refresh the live HLS session for a channel."""
+    key = live_key(channel)
+    with _sessions_lock:
+        session = _sessions.get(key)
+        if session and session["proc"].poll() is None:
+            session["last_access"] = time.monotonic()
+            return session
+        if session:
+            shutil.rmtree(session["dir"], ignore_errors=True)
+        directory = HLS_ROOT / key
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True, exist_ok=True)
+        session = _spawn("live", key, _live_cmd(channel, directory), directory)
+        _sessions[key] = session
+        _ensure_reaper()
+        return session
+
+
+def ensure_play(from_cam: str, to_cam: str) -> dict:
+    """Start or refresh the playback HLS session (single slot: kills previous)."""
+    key = play_key(from_cam, to_cam)
+    with _sessions_lock:
+        for other_key, other in list(_sessions.items()):
+            if other_key.startswith("play-") and other_key != key:
+                _kill(other)
+                shutil.rmtree(other["dir"], ignore_errors=True)
+                del _sessions[other_key]
+        session = _sessions.get(key)
+        if session and session["proc"].poll() is None:
+            session["last_access"] = time.monotonic()
+            return session
+        if session:
+            shutil.rmtree(session["dir"], ignore_errors=True)
+        directory = HLS_ROOT / key
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True, exist_ok=True)
+        session = _spawn("play", key, _play_cmd(from_cam, to_cam, directory), directory)
+        _sessions[key] = session
+        _ensure_reaper()
+        return session
+
+
+def get_session(key: str) -> dict | None:
+    """Touch and return a session if it is still alive."""
+    with _sessions_lock:
+        session = _sessions.get(key)
+        if session and session["proc"].poll() is None:
+            session["last_access"] = time.monotonic()
+            return session
+        return None
+
+
+def session_dir(key: str) -> Path | None:
+    with _sessions_lock:
+        session = _sessions.get(key)
+        return session["dir"] if session else None
+
+
+def _kill(session: dict) -> None:
+    proc = session["proc"]
+    if proc.poll() is None:
         proc.kill()
         try:
             proc.wait(timeout=3)
@@ -136,73 +282,26 @@ def _kill_locked(proc: subprocess.Popen | None) -> None:
             pass
 
 
-def start_live(channel: str, transcode: bool = False) -> subprocess.Popen:
-    """Start (or restart) the live ffmpeg session for one channel."""
-    global _live_procs
-    with _live_lock:
-        old = _live_procs.get(channel)
-        _kill_locked(old)
-        proc = subprocess.Popen(
-            live_cmd(channel), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
-        )
-        _live_procs[channel] = proc
-        return proc
+def _reap_loop() -> None:
+    while True:
+        time.sleep(30)
+        now = time.monotonic()
+        with _sessions_lock:
+            for key, session in list(_sessions.items()):
+                idle_limit = LIVE_IDLE_S if session["kind"] == "live" else PLAY_IDLE_S
+                if now - session["last_access"] > idle_limit or session["proc"].poll() is not None:
+                    _kill(session)
+                    shutil.rmtree(session["dir"], ignore_errors=True)
+                    del _sessions[key]
 
 
-def start_playback(rtsp_url: str, duration_s: int, transcode: bool = False) -> subprocess.Popen:
-    """Start a playback session, enforcing the camera's single-playback limit."""
-    global _playback_proc
-    with _playback_lock:
-        _kill_locked(_playback_proc)
-        proc = subprocess.Popen(
-            playback_cmd(rtsp_url, duration_s),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=0,
-        )
-        _playback_proc = proc
-        return proc
-
-
-def stop_playback() -> None:
-    global _playback_proc
-    with _playback_lock:
-        _kill_locked(_playback_proc)
-        _playback_proc = None
-
-
-def pump(proc: subprocess.Popen, write_chunk, timeout: float = STARTUP_TIMEOUT_S):
-    """Yield nothing; instead push proc.stdout into write_chunk() until EOF/error.
-
-    Kills ffmpeg when the client disconnects (write_chunk raises) and guards
-    against a startup hang where ffmpeg produces no bytes at all.
-    """
-    import selectors
-    import time
-
-    sel = selectors.DefaultSelector()
-    sel.register(proc.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
-    got_any = False
-    try:
-        while True:
-            remaining = deadline - time.monotonic() if not got_any else 30.0
-            events = sel.select(timeout=max(0.1, remaining))
-            if not events:
-                if not got_any and time.monotonic() >= deadline:
-                    raise TimeoutError("stream produced no data in time")
-                if proc.poll() is not None:
-                    break
-                continue
-            chunk = proc.stdout.read(CHUNK)
-            if not chunk:
-                break
-            got_any = True
-            deadline = time.monotonic() + 30.0
-            write_chunk(chunk)
-    finally:
-        sel.close()
-        _kill_locked(proc)
+def _ensure_reaper() -> None:
+    global _reaper_started
+    with _reaper_lock:
+        if not _reaper_started:
+            thread = threading.Thread(target=_reap_loop, daemon=True)
+            thread.start()
+            _reaper_started = True
 
 
 def mock_snapshot_jpeg() -> bytes:
@@ -238,7 +337,7 @@ class MockDownloadResponse:
     status_code = 200
     headers = {"Content-Type": "video/mp4"}
 
-    def iter_content(self, chunk_size):  # signature parity with requests
+    def iter_content(self, chunk_size):
         out = subprocess.run(
             [
                 "ffmpeg",
@@ -276,11 +375,3 @@ class MockDownloadResponse:
 
 def mock_download_response():
     return MockDownloadResponse()
-
-
-def build_playback_url(from_cam: str, to_cam: str) -> str:
-    """RTSP track URL for a time window (real camera; mock ignores the URL)."""
-    from urllib.parse import quote
-
-    q = quote(f"starttime={from_cam}&endtime={to_cam}", safe="=&")
-    return f"rtsp://{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101?{q}"

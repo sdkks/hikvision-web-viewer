@@ -1,303 +1,147 @@
-/* hikvision-web-viewer client: MSE/ManagedMediaSource fMP4 streaming, ~no framework. */
+/* hikvision-web-viewer client: HLS via hls.js (server transcodes HEVC -> H.264). */
 (function () {
   "use strict";
 
-  /* [viewer] diagnostics are silent unless debug=1 is in the query string
-     or localStorage.viewerDebug === "1". */
-  var DEBUG = (function () {
-    if (/[?&]debug=1/.test(location.search)) return true;
-    try { return localStorage.viewerDebug === "1"; } catch (e) { return false; }
-  })();
+  var DEBUG = new URLSearchParams(location.search).has("debug");
   function vlog() {
-    if (DEBUG) console.log.apply(console, arguments);
+    if (DEBUG) console.log.apply(console, ["[viewer]"].concat([].slice.call(arguments)));
   }
 
-  /* ── MSE plumbing ─────────────────────────────────────────────── */
+  var current = { hls: null, video: null, timer: null, attempts: 0, bufferedOnce: false, t0: null };
+  var renderStatus = function () {};
 
-  function pickMediaSourceCtor() {
-    if (window.ManagedMediaSource) return window.ManagedMediaSource;
-    if (window.MediaSource) return window.MediaSource;
-    return null;
-  }
+  function setStatus(kind, text) { renderStatus(kind, text); }
 
-  async function canDecodeInPractice(codecString) {
-    // MediaSource.isTypeSupported over-reports (e.g. HEVC on Chrome without a decoder).
-    // WebCodecs' isConfigSupported reflects what can actually decode here.
-    if (window.VideoDecoder && VideoDecoder.isConfigSupported) {
-      try {
-        const r = await VideoDecoder.isConfigSupported({ codec: codecString });
-        if (r && r.supported === false) return false;
-      } catch (e) { /* keep optimistic */ }
+  function destroyStream() {
+    if (current.timer) { clearTimeout(current.timer); current.timer = null; }
+    if (current.hls) { current.hls.destroy(); current.hls = null; }
+    else if (current.video) {
+      current.video.removeAttribute("src");
+      try { current.video.load(); } catch (e) { /* noop */ }
     }
-    return true;
+    current.bufferedOnce = false;
+    current.attempts = 0;
   }
 
-  async function pickCodec(candidates) {
-    const msCtor = pickMediaSourceCtor();
-    if (!msCtor || !msCtor.isTypeSupported) return null;
-    for (const candidate of candidates) {
-      if (msCtor.isTypeSupported(candidate) && (await canDecodeInPractice(candidate))) {
-        return candidate;
-      }
-    }
-    return null;
+  function showEnd(warn, text) {
+    var note = document.getElementById("endnote");
+    if (!note) return;
+    note.className = "endnote" + (warn ? " warn" : "");
+    note.innerHTML = "<p>" + text + "</p><div class='row'>" +
+      "<button type='button' class='retry' onclick='window.location.reload()'>Replay</button>" +
+      "<a class='retry' style='display:inline-flex;align-items:center;text-decoration:none' " +
+      "href='/recordings'>← Results</a></div>";
+    note.hidden = false;
   }
 
-  var CODEC_SETS = {
-    // Main channel is H.265 on this camera: HEVC-first (Safari), AVC fallback (transcoded cams).
-    hevc: ['video/mp4; codecs="hvc1.1.6.L93.B0"', 'video/mp4; codecs="hvc1.1.6.L120.90"',
-           'video/mp4; codecs="avc1.640029"', 'video/mp4; codecs="avc1.42E01E"'],
-    // Sub channel / H.264 sources: AVC-first.
-    avc: ['video/mp4; codecs="avc1.640029"', 'video/mp4; codecs="avc1.42E01E"',
-          'video/mp4; codecs="hvc1.1.6.L93.B0"'],
-  };
-
-  /* Split an fMP4 byte stream into MSE-ready segments:
-     init segment = boxes before the first moof; each media segment = moof + trailing boxes. */
-  function BoxSplitter(onInit, onSegment) {
-    this.buf = null;
-    this.onInit = onInit;
-    this.onSegment = onSegment;
-    this.inMedia = false;
-    this.pending = [];
-  }
-
-  BoxSplitter.prototype.push = function (u8) {
-    this.buf = this.buf ? concat(this.buf, u8) : u8;
-    var off = 0;
-    for (;;) {
-      if (this.buf.length - off < 8) break;
-      var view = new DataView(this.buf.buffer, this.buf.byteOffset + off);
-      var size = view.getUint32(0);
-      if (size === 1) {
-        if (this.buf.length - off < 16) break;
-        size = Number(view.getBigUint64(8));
-      } else if (size === 0) {
-        size = this.buf.length - off; // "to end of file"
-      }
-      if (size < 8) { this.fail(); return; }
-      if (this.buf.length - off < size) break;
-      var type = String.fromCharCode(
-        this.buf[off + 4], this.buf[off + 5], this.buf[off + 6], this.buf[off + 7]);
-      var box = this.buf.subarray(off, off + size);
-      if (type === "moof") {
-        this.flushPending();
-        this.inMedia = true;
-        this.pending.push(box);
-      } else if (this.inMedia) {
-        this.pending.push(box);
-      } else {
-        this.onInit(box);
-      }
-      off += size;
-    }
-    this.buf = this.buf.length > off ? this.buf.subarray(off) : null;
-  };
-
-  BoxSplitter.prototype.flushPending = function () {
-    if (this.pending.length) {
-      var seg = concat.apply(null, this.pending);
-      this.pending = [];
-      this.onSegment(seg);
-    }
-  };
-
-  BoxSplitter.prototype.finish = function () { this.flushPending(); };
-
-  BoxSplitter.prototype.fail = function () {
-    this.buf = null;
-    this.onInit = this.onSegment = function () {};
-  };
-
-  function concat() {
-    var total = 0, i;
-    for (i = 0; i < arguments.length; i++) total += arguments[i].length;
-    var out = new Uint8Array(total), pos = 0;
-    for (i = 0; i < arguments.length; i++) { out.set(arguments[i], pos); pos += arguments[i].length; }
-    return out;
-  }
-
-  /* ── stream attach ────────────────────────────────────────────── */
+  /* ── HLS attach: hls.js everywhere; Safari native HLS as fallback ── */
 
   function attach(video, url, opts) {
-    var state = {
-      attempts: 0,
-      aborted: false,
-      controller: new AbortController(),
-      sb: null,
-      ms: null,
-      queue: [],
-      splitter: null,
-    };
+    var expected = Number(video.dataset.expected || 0);
+    var t0 = null;
+    var endedHandled = false;
 
-    function setStatus(kind, text) {
-      if (opts.onStatus) opts.onStatus(kind, text, state);
+    function fmt(s) {
+      s = Math.max(0, Math.floor(s));
+      var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+      return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(r).padStart(2, "0");
     }
 
-    function feed() {
-      if (state.sb && !state.sb.updating && state.queue.length) {
-        try { state.sb.appendBuffer(state.queue.shift()); }
-        catch (e) { setStatus("err", "Playback buffer error — try Replay."); state.aborted = true; }
-      }
+    function drawProgress() {
+      if (opts.kind !== "play") return;
+      var el = document.getElementById("counter");
+      var pr = document.getElementById("progress");
+      var elapsed = video.currentTime || 0;
+      if (el) el.textContent = fmt(elapsed) + " / " + fmt(expected);
+      if (pr && expected) pr.style.width = Math.min(100, (elapsed / expected) * 100) + "%";
+      video.dataset.elapsed = String(Math.floor(elapsed));
     }
 
-    function trimLiveBuffer() {
-      if (!opts.live || !state.sb || state.sb.updating) return;
-      try {
-        var end = state.sb.buffered.length ? state.sb.buffered.end(0) : 0;
-        if (end > 60) state.sb.remove(0, end - 30);
-      } catch (e) { /* buffered can be empty between appends */ }
-    }
-
-    async function openSource() {
-      var MS = pickMediaSourceCtor();
-      var codec = await pickCodec(opts.codecs || CODEC_SETS.avc);
-      if (!MS || !codec) {
-        setStatus("nosupport",
-          "This browser can't decode the camera stream. Use the still-image links below.");
-        return;
-      }
-      var ms = new MS();
-      state.ms = ms;
-      video.src = URL.createObjectURL(ms);
-      vlog("[viewer] ms created, mms=" + (MS === window.ManagedMediaSource) + ", codec=" + codec);
-      // ManagedMediaSource only opens its source once the element starts playing;
-      // kick it immediately (muted autoplay is allowed) to avoid a sourceopen deadlock.
-      video.play().catch(function () { /* retried after data arrives */ });
-      ms.addEventListener("sourceopen", function () {
-        if (state.aborted) return;
-        vlog("[viewer] sourceopen");
-        var sb;
-        try { sb = ms.addSourceBuffer(codec); }
-        catch (e) { vlog("[viewer] addSourceBuffer threw: " + e); setStatus("err", "Couldn't initialise player buffer."); return; }
-        state.sb = sb;
-        sb.addEventListener("updateend", function () { feed(); trimLiveBuffer(); });
-        sb.addEventListener("error", function () { vlog("[viewer] SOURCEBUFFER ERROR"); setStatus("err", "Player buffer error — the camera stream may have changed codecs."); });
-        ms.addEventListener("sourceclose", function () { vlog("[viewer] sourceclose"); });
-        sb.mode = "segments";
-        vlog("[viewer] sb ready, connecting");
-        connect();
+    video.addEventListener("playing", function () {
+      setStatus("ok", opts.live ? "Live · ≈3–5 s behind" : "Playing");
+      if (opts.kind === "play" && !t0) t0 = Date.now();
+    });
+    video.addEventListener("waiting", function () {
+      setStatus("connect", opts.live ? "Buffering…" : undefined);
+    });
+    if (opts.kind === "play") {
+      video.addEventListener("timeupdate", drawProgress);
+      video.addEventListener("ended", function () {
+        var elapsed = Number(video.dataset.elapsed || 0);
+        if (expected && elapsed < expected * 0.9) {
+          showEnd(true, "Stream ended early — another playback session may have started (the camera allows one).");
+        } else {
+          showEnd(false, "Clip finished.");
+        }
       });
     }
 
-    async function connect() {
-      vlog("[viewer] connect() fetching " + url);
-      setStatus("connect", opts.live ? "Connecting…" : "Connecting to clip… starts at its beginning.");
-      var firstByteSeen = false;
-      var initBoxes = [];
-      var initFlushed = false;
-      try {
-        var res = await fetch(url, { signal: state.controller.signal, cache: "no-store" });
-        if (!res.ok || !res.body) {
-          setStatus("err", "Couldn't open the stream (HTTP " + res.status + ").");
-          return;
+    function goNative() {
+      setStatus("connect", "Connecting…");
+      video.src = url;
+      video.play().catch(function () { /* controls remain */ });
+      video.addEventListener("error", function () {
+        setStatus("err", "Stream error. Still images below always work.");
+      });
+    }
+
+    if (window.Hls && Hls.isSupported()) {
+      var hls = new Hls({
+        lowLatencyMode: !!opts.live,
+        backBufferLength: opts.live ? 30 : Infinity,
+        maxBufferLength: opts.live ? 12 : 30,
+        liveSyncDurationCount: opts.live ? 3 : 0,
+      });
+      current.hls = hls;
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, function () {
+        setStatus("connect", opts.live ? "Connecting…" : "Connecting to clip… starts at its beginning.");
+        video.play().catch(function () { /* Low Power Mode etc; controls remain */ });
+      });
+      hls.on(Hls.Events.FRAG_BUFFERED, function () {
+        if (!current.bufferedOnce) {
+          current.bufferedOnce = true;
+          setStatus("ok", opts.live ? "Live · ≈3–5 s behind" : "Playing");
         }
-        state.splitter = new BoxSplitter(
-          function (initBox) {
-            vlog("[viewer] init box " + initBox.length + "B");
-            initBoxes.push(initBox);
-          },
-          function (seg) {
-            if (!initFlushed) {
-              const packed = concat.apply(null, initBoxes);
-              vlog("[viewer] flushing init " + packed.length + "B + seg " + seg.length + "B");
-              state.queue.push(packed);
-              initBoxes = [];
-              initFlushed = true;
-            } else {
-              vlog("[viewer] seg " + seg.length + "B");
-            }
-            state.queue.push(seg);
-            feed();
+      });
+      hls.on(Hls.Events.ERROR, function (evt, data) {
+        if (!data.fatal) return;
+        vlog("fatal", data.type, data.details);
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          if (opts.live) {
+            current.attempts += 1;
+            var delays = [2000, 4000, 8000, 15000, 30000];
+            var delay = delays[Math.min(current.attempts - 1, delays.length - 1)];
+            setStatus("warn", "Connection lost — reconnecting (attempt " + current.attempts + ")…");
+            current.timer = setTimeout(function () { hls.startLoad(); }, delay);
+          } else {
+            setStatus("err", "Connection lost. The camera's streams usually recover — try Replay.");
           }
-        );
-        var reader = res.body.getReader();
-        for (;;) {
-          var chunk = await reader.read();
-          if (chunk.done) break;
-          if (!firstByteSeen) { firstByteSeen = true; setStatus("ok", opts.live ? "Live · ≈2 s behind" : "Playing"); }
-          state.splitter.push(chunk.value);
-          try { await video.play(); } catch (e) { /* user gesture needed; controls remain */ }
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          setStatus("warn", "Recovering playback…");
+          hls.recoverMediaError();
+        } else {
+          setStatus("err", "Stream error: " + data.details + ". Still images below always work.");
         }
-        if (state.splitter) state.splitter.finish();
-        onEnded();
-      } catch (err) {
-        if (state.aborted || (err && err.name === "AbortError")) return;
-        setStatus("err", "Connection lost." + (opts.live ? "" : " The camera's streams usually recover — try Replay."));
-        if (opts.live) scheduleReconnect();
-      }
+      });
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      goNative(); // Safari: plays the (H.264) HLS natively
+    } else {
+      setStatus("nosupport", "This browser can't play the stream. Use the still-image links below.");
     }
-
-    function scheduleReconnect() {
-      state.attempts += 1;
-      var delays = [2000, 4000, 8000, 15000, 30000];
-      var delay = delays[Math.min(state.attempts - 1, delays.length - 1)];
-      setStatus("warn", "Connection lost — reconnecting (attempt " + state.attempts + ")…");
-      setTimeout(function () { if (!state.aborted) connect(); }, delay);
-    }
-
-    function onEnded() {
-      if (opts.live) { scheduleReconnect(); return; }
-      var expected = Number(video.dataset.expected || 0);
-      var elapsed = Number(video.dataset.elapsed || 0);
-      if (expected && elapsed < expected * 0.9) {
-        setStatus("warn", "");
-        showEnd(true,
-          "Stream ended early — another playback session may have started (the camera allows one).");
-      } else {
-        showEnd(false, "Clip finished.");
-      }
-    }
-
-    function showEnd(warn, text) {
-      var note = document.getElementById("endnote");
-      if (!note) return;
-      note.className = "endnote" + (warn ? " warn" : "");
-      note.innerHTML = "<p>" + text + "</p><div class='row'>" +
-        "<button type='button' class='retry' onclick='window.location.reload()'>Replay</button>" +
-        "<a class='retry' style='display:inline-flex;align-items:center;text-decoration:none' href='/recordings'>← Results</a></div>";
-      note.hidden = false;
-    }
-
-    state.abort = function () {
-      state.aborted = true;
-      state.controller.abort();
-      try { if (state.ms && state.ms.endOfSession) state.ms.endOfSession(); } catch (e) { /* noop */ }
-    };
-
-    state.debug = function () {
-      var ranges = null;
-      try {
-        ranges = state.sb && state.sb.buffered.length
-          ? [state.sb.buffered.start(0), state.sb.buffered.end(0)] : null;
-      } catch (e) { /* noop */ }
-      return { sbAttached: !!state.sb, queueLen: state.queue.length,
-               msState: state.ms ? state.ms.readyState : null, buffered: ranges,
-               attempts: state.attempts, aborted: state.aborted,
-               videoReady: video.readyState, videoPaused: video.paused,
-               videoErr: video.error ? String(video.error.code) : null };
-    };
-    window.__streamState = state;
-
-    openSource();
-    return state;
   }
 
   /* ── live page ────────────────────────────────────────────────── */
 
-  var liveState = null;
-
   function initLive(video) {
-    var statusLine = document.getElementById("status-line");
-    var retryBtn = document.getElementById("retry");
-    var current = video.dataset.channel || "101";
-
-    function render(kind, text) {
-      if (!statusLine) return;
-      var dot = statusLine.querySelector(".dot");
-      var label = statusLine.querySelector(".label");
+    renderStatus = function (kind, text) {
+      var line = document.getElementById("status-line");
+      if (!line) return;
+      var dot = line.querySelector(".dot");
+      var label = line.querySelector(".label");
       var map = {
-        ok: ["dot ok", "Live · ≈2 s behind"],
+        ok: ["dot ok", text || "Live"],
         connect: ["dot spin", text || "Connecting…"],
         warn: ["dot warn", text],
         err: ["dot err", text],
@@ -306,21 +150,16 @@
       var m = map[kind] || ["dot", text];
       if (dot) dot.className = "dot " + m[0].replace("dot ", "");
       if (label) label.textContent = m[1];
-      if (retryBtn) retryBtn.hidden = !(kind === "err" || kind === "warn");
-    }
+      var retry = document.getElementById("retry");
+      if (retry) retry.hidden = !(kind === "err");
+    };
 
     function start(channel) {
-      if (liveState) { liveState.abort(); liveState = null; }
+      destroyStream();
       video.dataset.channel = channel;
-      video.dataset.expected = "";
-      video.setAttribute("poster", "/snapshot?ch=" + channel);
-      current = channel;
-      var codecSet = video.dataset.codecs || (channel === "101" ? "hevc" : "avc");
-      liveState = attach(video, "/stream/" + channel, {
-        live: true,
-        codecs: CODEC_SETS[codecSet] || CODEC_SETS.avc,
-        onStatus: function (kind, text) { render(kind, text); },
-      });
+      video.poster = "/snapshot?ch=" + channel;
+      renderStatus("connect", "Connecting…");
+      attach(video, "/hls/live/index.m3u8?ch=" + channel, { live: true, kind: "live" });
     }
 
     document.querySelectorAll(".chan").forEach(function (btn) {
@@ -328,43 +167,30 @@
         document.querySelectorAll(".chan").forEach(function (b) {
           b.setAttribute("aria-pressed", b === btn ? "true" : "false");
         });
-        render("connect", "Switching…");
+        renderStatus("connect", "Switching…");
         start(btn.dataset.channel);
       });
     });
 
+    var retryBtn = document.getElementById("retry");
     if (retryBtn) retryBtn.addEventListener("click", function () {
-      render("connect", "Connecting…");
-      start(current);
+      renderStatus("connect", "Connecting…");
+      start(video.dataset.channel || "101");
     });
 
-    start(current);
+    start(video.dataset.channel || "101");
   }
 
   /* ── playback page ────────────────────────────────────────────── */
 
   function initPlayback(video) {
-    var statusLine = document.getElementById("status-line");
-    var counter = document.getElementById("counter");
-    var progress = document.getElementById("progress");
-    var expected = Number(video.dataset.expected || 0);
-    var ticker = null;
-    var wallclock = false;
-    var lastElapsed = 0;
-
-    function fmt(s) {
-      s = Math.max(0, Math.floor(s));
-      var m = Math.floor(s / 60), r = s % 60;
-      var h = Math.floor(m / 60); m = m % 60;
-      return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(r).padStart(2, "0");
-    }
-
-    function render(kind, text) {
-      if (!statusLine) return;
-      var dot = statusLine.querySelector(".dot");
-      var label = statusLine.querySelector(".label");
+    renderStatus = function (kind, text) {
+      var line = document.getElementById("status-line");
+      if (!line) return;
+      var dot = line.querySelector(".dot");
+      var label = line.querySelector(".label");
       var map = {
-        ok: ["dot ok", "Playing"],
+        ok: ["dot ok", text || "Playing"],
         connect: ["dot spin", text || "Connecting…"],
         warn: ["dot warn", text],
         err: ["dot err", text],
@@ -373,46 +199,8 @@
       var m = map[kind] || ["dot", text];
       if (dot) dot.className = "dot " + m[0].replace("dot ", "");
       if (label) label.textContent = m[1];
-    }
-
-    function draw(elapsed) {
-      lastElapsed = elapsed;
-      if (counter) counter.textContent = fmt(elapsed) + " / " + fmt(expected);
-      if (progress && expected) progress.style.width = Math.min(100, (elapsed / expected) * 100) + "%";
-      video.dataset.elapsed = String(Math.floor(elapsed));
-    }
-
-    // Preferred clock: the video element. timeupdate only fires while currentTime
-    // moves, so pausing freezes the counter and progress for free.
-    video.addEventListener("timeupdate", function () {
-      if (ticker) { clearInterval(ticker); ticker = null; }
-      wallclock = false;
-      draw(video.currentTime);
-    });
-
-    attach(video, video.dataset.url, {
-      live: false,
-      codecs: CODEC_SETS[video.dataset.codecs] || CODEC_SETS.hevc,
-      onStatus: function (kind, text) {
-        render(kind, text);
-        if (kind === "ok" && !ticker) {
-          // Fallback clock: some MSE paths keep currentTime at 0. Only after
-          // 3 s without movement do we tick from the wall clock — still
-          // pause-aware, so a paused video never advances the counter.
-          var started = Date.now();
-          var anchor = started;
-          ticker = setInterval(function () {
-            if (!wallclock) {
-              if (video.currentTime > 0 || Date.now() - started < 3000) return;
-              wallclock = true;
-              anchor = Date.now() - lastElapsed * 1000;
-            }
-            if (video.paused) { anchor = Date.now() - lastElapsed * 1000; return; }
-            draw((Date.now() - anchor) / 1000);
-          }, 1000);
-        }
-      },
-    });
+    };
+    attach(video, video.dataset.url, { live: false, kind: "play" });
   }
 
   /* ── boot ─────────────────────────────────────────────────────── */
