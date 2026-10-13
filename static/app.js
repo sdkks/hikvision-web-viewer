@@ -93,7 +93,7 @@
     }
 
     video.addEventListener("playing", function () {
-      setStatus("ok", opts.live ? "Live · ≈3–5 s behind" : "Playing");
+      setStatus("ok", opts.live ? "Live" : "Playing");
       if (opts.kind === "play" && !t0) t0 = Date.now();
     });
     video.addEventListener("waiting", function () {
@@ -137,9 +137,20 @@
       hls.on(Hls.Events.FRAG_BUFFERED, function () {
         if (!current.bufferedOnce) {
           current.bufferedOnce = true;
-          setStatus("ok", opts.live ? "Live · ≈3–5 s behind" : "Playing");
+          setStatus("ok", opts.live ? "Live" : "Playing");
         }
       });
+      if (opts.live) {
+        // Honest live latency: camera GOPs vary, so measure instead of promising.
+        var lastShown = -1;
+        hls.on(Hls.Events.LEVEL_UPDATED, function () {
+          var lat = Math.round(hls.latency || 0);
+          if (lat > 0 && lat !== lastShown) {
+            lastShown = lat;
+            setStatus("ok", "Live · ≈" + lat + " s behind");
+          }
+        });
+      }
       hls.on(Hls.Events.ERROR, function (evt, data) {
         if (!data.fatal) return;
         vlog("fatal", data.type, data.details);

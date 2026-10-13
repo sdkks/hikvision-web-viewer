@@ -57,7 +57,13 @@ or H.265+ — the viewer adapts automatically.
 
 The codec is read at session start, so after changing the camera's encoding the
 new mode applies the next time a stream starts (close/hide the tab, or wait for
-the idle reaper). Still-image links work everywhere,
+the idle reaper).
+
+**Live latency follows the camera's I-frame interval.** In copy mode HLS segments
+can only be cut at keyframes: a 50-frame GOP at 12 fps gives ~4 s segments and a
+~12 s live delay. Set the camera's I-frame interval to 1-2 s worth of frames
+(e.g. 12-24 at 12 fps) for a snappier live view. The status line shows the
+measured latency, whatever it is. Still-image links work everywhere,
 JavaScript or not.
 
 ## Notes on honesty (by design)
