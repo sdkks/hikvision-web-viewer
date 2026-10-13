@@ -72,11 +72,11 @@ class Clip:
     duration_s: int
 
     @property
-    def start_dt(self):
+    def start_dt(self) -> datetime:
         return util.parse_cam_time(self.start_utc)
 
     @property
-    def end_dt(self):
+    def end_dt(self) -> datetime:
         return util.parse_cam_time(self.end_utc)
 
 
@@ -233,7 +233,7 @@ class Camera:
             raise ServiceDownError(f"snapshot ch{channel} -> HTTP {r.status_code}")
         return r.content
 
-    def download_stream(self, escaped_uri: str):
+    def download_stream(self, escaped_uri: str) -> requests.Response:
         """Stream a recorded file over HTTP via /ISAPI/ContentMgmt/download.
 
         Returns the raw requests response (stream=True); the caller iterates it
@@ -419,7 +419,7 @@ class MockCamera(Camera):
         raise ServiceDownError(f"mock has no fixture for {path}")
 
 
-def _first_element(xml_text: str, local_name: str):
+def _first_element(xml_text: str, local_name: str) -> ElementTree.Element | None:
     """First element with this local name, ignoring XML namespaces/attributes.
 
     Camera firmware varies: elements may carry attributes and be namespaced, so
@@ -514,11 +514,11 @@ def _int_text(xml: str, tag: str) -> int:
 # ── motion detection XML ─────────────────────────────────────────────────────
 
 
-def _root_namespace(root) -> str:
+def _root_namespace(root: ElementTree.Element) -> str:
     return root.tag[1:].split("}", 1)[0] if root.tag.startswith("{") else ""
 
 
-def _find_descendant(root, local_name):
+def _find_descendant(root: ElementTree.Element, local_name: str) -> ElementTree.Element | None:
     """First descendant with this local name, ignoring namespace/attributes."""
     for element in root.iter():
         if element.tag.rsplit("}", 1)[-1] == local_name:
@@ -526,19 +526,21 @@ def _find_descendant(root, local_name):
     return None
 
 
-def _find_child(parent, local_name):
+def _find_child(parent: ElementTree.Element, local_name: str) -> ElementTree.Element | None:
     for element in list(parent):
         if element.tag.rsplit("}", 1)[-1] == local_name:
             return element
     return None
 
 
-def _element_text(root, local_name: str) -> str:
+def _element_text(root: ElementTree.Element, local_name: str) -> str:
     element = _find_descendant(root, local_name)
     return (element.text or "").strip() if element is not None else ""
 
 
-def _set_child(parent, local_name: str, value: str, ns: str):
+def _set_child(
+    parent: ElementTree.Element, local_name: str, value: str, ns: str
+) -> ElementTree.Element:
     element = _find_child(parent, local_name)
     if element is None:
         element = ElementTree.SubElement(parent, f"{{{ns}}}{local_name}" if ns else local_name)
@@ -546,7 +548,7 @@ def _set_child(parent, local_name: str, value: str, ns: str):
     return element
 
 
-def _ensure_path(root, path: list[str], ns: str):
+def _ensure_path(root: ElementTree.Element, path: list[str], ns: str) -> ElementTree.Element:
     parent = root
     for local_name in path:
         child = _find_child(parent, local_name)

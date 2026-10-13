@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from . import camera, config
@@ -424,7 +425,7 @@ class MockDownloadResponse:
     status_code = 200
     headers = {"Content-Type": "video/mp4"}
 
-    def iter_content(self, chunk_size):
+    def iter_content(self, chunk_size: int) -> Iterator[bytes]:
         out = subprocess.run(
             [
                 "ffmpeg",
@@ -464,9 +465,9 @@ class MockDownloadResponse:
         for i in range(0, len(data), chunk_size):
             yield data[i : i + chunk_size]
 
-    def close(self):
+    def close(self) -> None:
         pass
 
 
-def mock_download_response():
+def mock_download_response() -> MockDownloadResponse:
     return MockDownloadResponse()

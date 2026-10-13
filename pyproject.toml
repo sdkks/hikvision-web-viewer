@@ -15,3 +15,11 @@ warn_unused_ignores = true
 warn_unused_configs = true
 show_error_codes = true
 pretty = false
+warn_redundant_casts = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = ["viewer.*"]
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+disallow_untyped_calls = true

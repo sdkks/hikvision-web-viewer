@@ -161,7 +161,7 @@ def summary(counted: dict) -> str:
     return f"{armed} of {total} cells armed ({pct}%)"
 
 
-def valid_sensitivity(value) -> bool:
+def valid_sensitivity(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value in SENSITIVITY_STEPS
 
 

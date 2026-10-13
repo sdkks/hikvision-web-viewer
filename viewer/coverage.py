@@ -9,6 +9,7 @@ the map and the range rows can never disagree.
 from datetime import datetime, timedelta
 
 from . import util
+from .camera import Clip
 
 # Coverage levels: 0 none, 1 sparse, 2 about half, 3 dense, 4 full.
 MINUTE_COVERED = 4
@@ -47,7 +48,7 @@ def neighbours(files: list[dict], current_from: int, current_to: int, limit: int
     }
 
 
-def build_coverage(clips, day_start: datetime) -> dict:
+def build_coverage(clips: list[Clip], day_start: datetime) -> dict:
     """Build the coverage map for one local day.
 
     Args:

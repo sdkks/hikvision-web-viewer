@@ -8,6 +8,7 @@ import re
 from datetime import datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import camera, config, coverage, motion, streams, templates, util
@@ -144,7 +145,7 @@ def _is_json_content_type(value: str) -> bool:
     return (value or "").split(";", 1)[0].strip().lower() == "application/json"
 
 
-def motion_guard_reason(handler) -> str | None:
+def motion_guard_reason(handler: Any) -> str | None:
     """Why a POST /api/motion must be refused, or None when it may proceed.
 
     The viewer may run with HTTP Basic Auth, which browsers auto-attach to a
@@ -172,13 +173,13 @@ def motion_guard_reason(handler) -> str | None:
     return None
 
 
-def check_same_origin(handler) -> bool:
+def check_same_origin(handler: Any) -> bool:
     """True only when motion_guard_reason finds no objection."""
     return motion_guard_reason(handler) is None
 
 
 class ViewerApp:
-    def __init__(self):
+    def __init__(self) -> None:
         self.cam = camera.make_camera()
 
     # ── page fragments ───────────────────────────────────────────────
@@ -208,7 +209,7 @@ class ViewerApp:
             pass
         return line
 
-    def render(self, handler, title: str, content: str, nav: str, code: int = 200) -> None:
+    def render(self, handler: Any, title: str, content: str, nav: str, code: int = 200) -> None:
         active = {
             "nav_live": "page" if nav == "live" else "",
             "nav_rec": "page" if nav == "recordings" else "",
@@ -240,7 +241,7 @@ class ViewerApp:
             res = None
         return f"{fallback} · {res[0]}×{res[1]}" if res else fallback
 
-    def page_live(self, handler):
+    def page_live(self, handler: Any) -> None:
         channel = config.DEFAULT_CHANNEL if config.DEFAULT_CHANNEL in CHANNELS else "101"
         main_label, sub_label = "Main (full quality)", "Sub (lighter)"
         warning = ""
@@ -276,11 +277,11 @@ class ViewerApp:
         )
         return enabled
 
-    def page_motion(self, handler):
+    def page_motion(self, handler: Any) -> None:
         content = templates.MOTION.substitute(ssr_summary=self.motion_ssr_summary())
         self.render(handler, "Motion", content, nav="motion")
 
-    def page_recordings(self, handler, query: dict):
+    def page_recordings(self, handler: Any, query: dict[str, list[str]]) -> None:
         preset = (query.get("preset", [""])[0] or "").strip()
         frm_raw = (query.get("from", [""])[0] or "").strip()
         to_raw = (query.get("to", [""])[0] or "").strip()
@@ -316,9 +317,11 @@ class ViewerApp:
         )
         code = 200
         if "searched" in query or frm_raw or preset:
-            results = self.run_search(from_val, to_val)
-            if isinstance(results, tuple):
-                results, code = results
+            outcome = self.run_search(from_val, to_val)
+            if isinstance(outcome, tuple):
+                results, code = outcome
+            else:
+                results = outcome
 
         content = (
             templates.RECORDINGS.replace("$details_open", details_open)
@@ -328,7 +331,7 @@ class ViewerApp:
         )
         self.render(handler, "Recordings", content, nav="recordings", code=code)
 
-    def run_search(self, from_val: str, to_val: str):
+    def run_search(self, from_val: str, to_val: str) -> str | tuple[str, int]:
         """Search and render results. Returns html str, or (html, http_code) on failure."""
         try:
             frm_dt, to_dt = util.parse_user_range(from_val, to_val)
@@ -419,7 +422,7 @@ class ViewerApp:
             "<p class='muted'>Times shown in the server's timezone; the camera stores UTC.</p>"
         )
 
-    def page_play(self, handler, query: dict):
+    def page_play(self, handler: Any, query: dict[str, list[str]]) -> None:
         from_cam = (query.get("from", [""])[0] or "").strip()
         to_cam = (query.get("to", [""])[0] or "").strip()
         try:
@@ -492,7 +495,7 @@ class ViewerApp:
         self.render(handler, "Playback", content, nav="recordings")
 
     # ── streams & data ───────────────────────────────────────────────
-    def route_static(self, handler, name: str):
+    def route_static(self, handler: Any, name: str) -> None:
         if not name:
             handler.send_error(404)
             return
@@ -510,7 +513,7 @@ class ViewerApp:
         handler.end_headers()
         handler.wfile.write(data)
 
-    def route_hls_playlist(self, handler, kind: str, query: dict):
+    def route_hls_playlist(self, handler: Any, kind: str, query: dict[str, list[str]]) -> None:
         """Ensure the session exists and serve its playlist with absolute segment URLs.
 
         Seeking is session-restart semantics: requesting the playlist with an adjusted
@@ -582,7 +585,7 @@ class ViewerApp:
         handler.end_headers()
         handler.wfile.write(body)
 
-    def route_hls_media(self, handler, key: str, name: str):
+    def route_hls_media(self, handler: Any, key: str, name: str) -> None:
         if "/" in name or ".." in name or not name.endswith((".ts", ".m3u8")):
             handler.send_error(404)
             return
@@ -599,7 +602,7 @@ class ViewerApp:
         handler.end_headers()
         handler.wfile.write(data)
 
-    def route_hls_stop(self, handler, path: str, query: dict):
+    def route_hls_stop(self, handler: Any, path: str, query: dict[str, list[str]]) -> None:
         """Explicit stop: the viewer says nobody is watching (tab hidden/closed)."""
         if path == "/hls-live-stop":
             channel = query.get("ch", ["101"])[0] or "101"
@@ -613,7 +616,7 @@ class ViewerApp:
         handler.end_headers()
         handler.wfile.write(body)
 
-    def route_hls(self, handler, path: str, query: dict):
+    def route_hls(self, handler: Any, path: str, query: dict[str, list[str]]) -> None:
         # /hls/<key>/index.m3u8  |  /hls/media/<key>/<segment>
         parts = [p for p in path.split("/") if p][1:]  # drop 'hls'
         if len(parts) == 2 and parts[1] == "index.m3u8":
@@ -622,7 +625,7 @@ class ViewerApp:
             return self.route_hls_media(handler, parts[1], parts[2])
         handler.send_error(404)
 
-    def route_coverage(self, handler, query: dict):
+    def route_coverage(self, handler: Any, query: dict[str, list[str]]) -> None:
         """Day coverage map for the picker: hours/minutes levels + merged ranges.
 
         One camera search per request; the client caches per date. States mirror
@@ -675,7 +678,7 @@ class ViewerApp:
                 payload["state"] = "empty"
         self.send_json(handler, payload)
 
-    def route_neighbours(self, handler, query: dict):
+    def route_neighbours(self, handler: Any, query: dict[str, list[str]]) -> None:
         """Recordings before/after the clip being watched (nearest first)."""
         from_cam = (query.get("from", [""])[0] or "").strip()
         to_cam = (query.get("to", [""])[0] or "").strip()
@@ -748,7 +751,9 @@ class ViewerApp:
         self.send_json(handler, payload)
 
     # ── motion detection ────────────────────────────────────────────
-    def _motion_view(self, enabled, enable_highlight, sensitivity, cells) -> dict:
+    def _motion_view(
+        self, enabled: bool, enable_highlight: bool, sensitivity: int, cells: list[list[bool]]
+    ) -> dict:
         counted = motion.counts(cells)
         return {
             "enabled": bool(enabled),
@@ -765,7 +770,7 @@ class ViewerApp:
             doc["enabled"], doc["enableHighlight"], doc["sensitivityLevel"], cells
         )
 
-    def _motion_intent(self, body) -> dict:
+    def _motion_intent(self, body: object) -> dict:
         """Validate an untrusted POST body into an intended state (raises ValueError)."""
         if not isinstance(body, dict):
             raise ValueError("body must be a JSON object")
@@ -794,13 +799,13 @@ class ViewerApp:
             "gridMap": motion.encode_gridmap(grid),
         }
 
-    def _motion_resolution(self):
+    def _motion_resolution(self) -> tuple[int, int] | None:
         try:
             return self.cam.stream_resolution("101")
         except camera.CameraError:
             return None
 
-    def route_motion_get(self, handler, query=None):
+    def route_motion_get(self, handler: Any, query: dict[str, list[str]] | None = None) -> None:
         payload: dict[str, object] = {"state": "ok", "state_detail": ""}
         try:
             doc = self.cam.motion_detection()
@@ -827,7 +832,7 @@ class ViewerApp:
             payload["resolution"] = self._motion_resolution()
         self.send_json(handler, payload)
 
-    def route_motion_post(self, handler):
+    def route_motion_post(self, handler: Any) -> None:
         reason = motion_guard_reason(handler)
         if reason is not None:
             self.send_json(handler, {"state": "forbidden", "state_detail": reason}, 403)
@@ -849,7 +854,7 @@ class ViewerApp:
             return
         self.send_json(handler, self.motion_write(intended))
 
-    def _reject_body(self, handler, length: int, detail: str) -> None:
+    def _reject_body(self, handler: Any, length: int, detail: str) -> None:
         """Answer a bad body with the typed 400 after draining what already arrived.
 
         Answering before the client has finished writing leaves unread bytes in
@@ -984,13 +989,13 @@ class ViewerApp:
             }
         return self._motion_ok(intended_view, actual_view)
 
-    def _motion_readback_safe(self):
+    def _motion_readback_safe(self) -> dict | None:
         try:
             return self._motion_view_from_doc(self.cam.motion_detection())
         except camera.CameraError, ValueError:
             return None
 
-    def _motion_ok(self, intended_view, actual_view) -> dict:
+    def _motion_ok(self, intended_view: dict, actual_view: dict) -> dict:
         differences = motion.diff(intended_view, actual_view)
         return {
             "state": "ok",
@@ -1001,7 +1006,7 @@ class ViewerApp:
             "state_detail": "",
         }
 
-    def send_json(self, handler, payload: dict, code: int = 200):
+    def send_json(self, handler: Any, payload: dict, code: int = 200) -> None:
         body = json.dumps(payload).encode()
         handler.send_response(code)
         handler.send_header("Content-Type", "application/json")
@@ -1010,7 +1015,7 @@ class ViewerApp:
         handler.end_headers()
         handler.wfile.write(body)
 
-    def route_download(self, handler, query: dict):
+    def route_download(self, handler: Any, query: dict[str, list[str]]) -> None:
         """Relay a recorded file from the camera's ISAPI download endpoint.
 
         The picker link carries the clip window plus the camera's own file name
@@ -1147,7 +1152,7 @@ class ViewerApp:
                 pass
 
     def _download_error(
-        self, handler, message: str, detail: str, retry_href: str = "", code: int = 502
+        self, handler: Any, message: str, detail: str, retry_href: str = "", code: int = 502
     ) -> None:
         """A download failure is still a browser navigation: answer with a card."""
         retry = ""
@@ -1166,7 +1171,7 @@ class ViewerApp:
             code=code,
         )
 
-    def route_snapshot(self, handler, query: dict):
+    def route_snapshot(self, handler: Any, query: dict[str, list[str]]) -> None:
         channel = query.get("ch", ["101"])[0] or "101"
         if channel not in CHANNELS:
             handler.send_error(404)
@@ -1186,7 +1191,7 @@ class ViewerApp:
         handler.end_headers()
         handler.wfile.write(jpeg)
 
-    def route_isapi(self, handler, path: str):
+    def route_isapi(self, handler: Any, path: str) -> None:
         try:
             text = self.cam._get("/ISAPI" + path)
         except camera.UnreachableError as exc:
@@ -1215,7 +1220,7 @@ class ViewerApp:
         )
 
     # ── dispatch ─────────────────────────────────────────────────────
-    def dispatch(self, handler):
+    def dispatch(self, handler: Any) -> None:
         if not check_auth(handler.headers.get("Authorization")):
             body = b"Authentication required.\n"
             handler.send_response(401)
@@ -1269,17 +1274,17 @@ class ViewerApp:
         handler.send_error(404)
 
 
-def make_handler(app: ViewerApp):
+def make_handler(app: ViewerApp) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def log_message(self, fmt, *args):  # quiet unless things break
+        def log_message(self, fmt: str, *args: Any) -> None:  # quiet unless things break
             pass
 
-        def do_GET(self):
+        def do_GET(self) -> None:
             app.dispatch(self)
 
-        def do_POST(self):
+        def do_POST(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path in ("/hls-live-stop", "/hls-play-stop", "/api/motion"):
                 app.dispatch(self)
@@ -1311,7 +1316,7 @@ def run() -> None:
     def _cleanup() -> None:
         streams.kill_all()
 
-    def _on_sigterm(*_args) -> None:
+    def _on_sigterm(*_args: Any) -> None:
         streams.kill_all()
         sys.exit(0)
 
