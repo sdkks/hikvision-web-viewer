@@ -54,6 +54,11 @@ the uv-managed `.venv` (Python 3.14), installs dependencies and the git hooks.
 `direnv` (via the committed `.envrc`) activates `.venv` and sources `config.env`
 on `cd`, so no manual exports are needed.
 
+If a `camera.json` exists (gitignored, like `config.env`), `.envrc` points
+`VIEWER_CONFIG` at it and stands the `HIK_*` camera variables down, so local runs use
+the same JSON file shape the container mounts; `config.env` still supplies the
+viewer's own settings. Delete `camera.json` to go back to the variables.
+
 Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`, which is the
 single source of truth: `make setup`, CI and the container all install from it with
 `--frozen`. After changing a dependency, run `uv lock` and commit the updated lock.
