@@ -9,12 +9,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import camera, config, coverage, streams, templates, util
+from . import camera, config, coverage, motion, streams, templates, util
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 STATIC_TYPES = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml"}
 
 CHANNELS = ("101", "102")
+
+# A motion body is at most a 18x22 boolean array; 1 MB is already generous.
+MAX_BODY_BYTES = 1_000_000
+# How much of a rejected body we will read before answering (see _reject_body).
+MAX_DRAIN_BYTES = 4_000_000
+# ...and how long we will wait for it: a client that declares a huge body and
+# never sends it must still get the typed reply, and must not pin the thread.
+DRAIN_DEADLINE_S = 0.35
 
 
 def auth_required() -> bool:
@@ -40,6 +48,73 @@ def check_auth(header_value: str | None) -> bool:
 
 def esc(value: str) -> str:
     return html.escape(str(value), quote=True)
+
+
+# Loopback names always acceptable: they name this machine, not the attacker.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# Wildcard binds are not identities, so they never become an accepted Host.
+_WILDCARD_BINDS = frozenset({"0.0.0.0", "::", "*", ""})
+
+
+def _host_name(host_header: str) -> str:
+    """Host-header value -> lowercased host name, port stripped, IPv6 un-bracketed."""
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):  # IPv6 literal: [::1]:8756 or [::1]
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def allowed_hosts() -> set[str]:
+    """Host names a request may claim: loopback, a specific bind host, and the
+    operator's VIEWER_ALLOWED_HOSTS."""
+    hosts = set(LOOPBACK_HOSTS)
+    bind = _host_name(config.BIND_HOST)
+    if bind not in _WILDCARD_BINDS:
+        hosts.add(bind)
+    hosts.update(_host_name(entry) for entry in config.ALLOWED_HOSTS)
+    return {host for host in hosts if host}
+
+
+def _is_json_content_type(value: str) -> bool:
+    """True when the Content-Type media type is exactly application/json.
+
+    Parsed as a media type so parameters (charset, boundary, ...) are allowed,
+    but a substring such as application/jsonp or text/application/json is not.
+    """
+    return (value or "").split(";", 1)[0].strip().lower() == "application/json"
+
+
+def motion_guard_reason(handler) -> str | None:
+    """Why a POST /api/motion must be refused, or None when it may proceed.
+
+    The viewer may run with HTTP Basic Auth, which browsers auto-attach to a
+    cross-site form POST. Two cheap gates keep that honest without tokens or
+    sessions: the Host must be one we recognise (a DNS-rebinding attacker
+    controls the Origin *and* the Host, so Origin-vs-Host alone is not enough),
+    and the Origin, when present, must agree with Host. A missing Origin is
+    accepted: a same-host curl/CLI client is not a CSRF path. The body must be
+    application/json.
+    """
+    host_header = handler.headers.get("Host", "")
+    host = _host_name(host_header)
+    if not host:
+        return "the request had no Host header"
+    if host not in allowed_hosts():
+        return (
+            f"host '{host}' is not an accepted host (a rebound Host is not accepted; "
+            "a LAN or reverse-proxy host must be listed in VIEWER_ALLOWED_HOSTS)"
+        )
+    origin = handler.headers.get("Origin")
+    if origin and urlparse(origin).netloc.lower() != host_header.lower():
+        return "the Origin does not match the Host"
+    if not _is_json_content_type(handler.headers.get("Content-Type", "")):
+        return "the request body must be application/json"
+    return None
+
+
+def check_same_origin(handler) -> bool:
+    """True only when motion_guard_reason finds no objection."""
+    return motion_guard_reason(handler) is None
 
 
 class ViewerApp:
@@ -75,6 +150,7 @@ class ViewerApp:
         active = {
             "nav_live": "page" if nav == "live" else "",
             "nav_rec": "page" if nav == "recordings" else "",
+            "nav_motion": "page" if nav == "motion" else "",
         }
         page = templates.BASE.substitute(
             title=esc(title),
@@ -107,6 +183,26 @@ class ViewerApp:
         # Codec hint: the mock encodes H.264; the real camera's main channel is H.265.
         content = content.replace("$codec_set", "avc" if config.MOCK else "hevc")
         self.render(handler, "Live", content, nav="live")
+
+    def motion_ssr_summary(self) -> str:
+        """Read-only summary for the no-JS floor; never blocks the JS editor."""
+        try:
+            doc = self.cam.motion_detection()
+            cells = motion.decode_gridmap(doc["gridMap"])
+        except camera.CameraError:
+            return "<p class='muted'>The camera's motion configuration could not be read.</p>"
+        except ValueError:
+            return "<p class='muted'>The camera returned an unexpected zone format.</p>"
+        state = "on" if doc["enabled"] else "off"
+        enabled = (
+            f"<p>Motion detection is <b>{state}</b>; sensitivity "
+            f"{doc['sensitivityLevel']}; {esc(motion.summary(motion.counts(cells)))}.</p>"
+        )
+        return enabled
+
+    def page_motion(self, handler):
+        content = templates.MOTION.substitute(ssr_summary=self.motion_ssr_summary())
+        self.render(handler, "Motion", content, nav="motion")
 
     def page_recordings(self, handler, query: dict):
         preset = (query.get("preset", [""])[0] or "").strip()
@@ -500,6 +596,245 @@ class ViewerApp:
             )
         self.send_json(handler, payload)
 
+    # ── motion detection ────────────────────────────────────────────
+    def _motion_view(self, enabled, enable_highlight, sensitivity, cells) -> dict:
+        counted = motion.counts(cells)
+        return {
+            "enabled": bool(enabled),
+            "enable_highlight": bool(enable_highlight),
+            "sensitivity": int(sensitivity),
+            "cells": cells,
+            "counts": counted,
+            "summary": motion.summary(counted),
+        }
+
+    def _motion_view_from_doc(self, doc: dict) -> dict:
+        cells = motion.decode_gridmap(doc["gridMap"])
+        return self._motion_view(
+            doc["enabled"], doc["enableHighlight"], doc["sensitivityLevel"], cells
+        )
+
+    def _motion_intent(self, body) -> dict:
+        """Validate an untrusted POST body into an intended state (raises ValueError)."""
+        if not isinstance(body, dict):
+            raise ValueError("body must be a JSON object")
+        cells = body.get("cells")
+        if not (isinstance(cells, list) and len(cells) == motion.ROWS):
+            raise ValueError(f"cells must be a {motion.ROWS}x{motion.COLS} boolean array")
+        grid: list[list[bool]] = []
+        for row in cells:
+            # Real booleans only: bool("0") is True, so coercing would arm a cell
+            # the caller asked to leave masked while claiming a boolean array.
+            if (
+                not isinstance(row, list)
+                or len(row) != motion.COLS
+                or not all(isinstance(cell, bool) for cell in row)
+            ):
+                raise ValueError(f"cells must be a {motion.ROWS}x{motion.COLS} boolean array")
+            grid.append(list(row))
+        sensitivity = body.get("sensitivity")
+        if not motion.valid_sensitivity(sensitivity):
+            raise ValueError(f"sensitivity must be one of {list(motion.SENSITIVITY_STEPS)}")
+        return {
+            "enabled": bool(body.get("enabled")),
+            "enable_highlight": bool(body.get("enable_highlight")),
+            "sensitivity": sensitivity,
+            "cells": grid,
+            "gridMap": motion.encode_gridmap(grid),
+        }
+
+    def _motion_resolution(self):
+        try:
+            return self.cam.stream_resolution("101")
+        except camera.CameraError:
+            return None
+
+    def route_motion_get(self, handler, query=None):
+        payload = {"state": "ok", "state_detail": ""}
+        try:
+            doc = self.cam.motion_detection()
+        except camera.UnreachableError:
+            payload.update(state="unreachable", state_detail=f"no route to {config.CAM_HOST}")
+        except camera.ServiceDownError:
+            payload.update(
+                state="service_down", state_detail="the camera did not answer the motion request"
+            )
+        except camera.BadResponseError as exc:
+            payload.update(state="bad_response", state_detail=str(exc))
+        except camera.CameraError:
+            payload.update(
+                state="bad_response", state_detail="the camera's motion reply was not usable"
+            )
+        else:
+            payload.update(self._motion_view_from_doc(doc))
+            payload["valid_sensitivities"] = list(motion.SENSITIVITY_STEPS)
+            payload["region_type"] = doc.get("regionType", "")
+            payload["row_granularity"] = doc.get("rowGranularity", "")
+            payload["column_granularity"] = doc.get("columnGranularity", "")
+            payload["resolution"] = self._motion_resolution()
+        self.send_json(handler, payload)
+
+    def route_motion_post(self, handler):
+        reason = motion_guard_reason(handler)
+        if reason is not None:
+            self.send_json(handler, {"state": "forbidden", "state_detail": reason}, 403)
+            return
+        try:
+            length = int(handler.headers.get("Content-Length") or 0)
+        except TypeError, ValueError:
+            self._reject_body(handler, 0, "Content-Length is not a number")
+            return
+        if length <= 0 or length > MAX_BODY_BYTES:
+            self._reject_body(handler, length, "missing or oversized body")
+            return
+        raw = handler.rfile.read(length)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            intended = self._motion_intent(body)
+        except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+            self.send_json(handler, {"state": "bad_request", "state_detail": str(exc)}, 400)
+            return
+        self.send_json(handler, self.motion_write(intended))
+
+    def _reject_body(self, handler, length: int, detail: str) -> None:
+        """Answer a bad body with the typed 400 after draining what already arrived.
+
+        Answering before the client has finished writing leaves unread bytes in
+        the socket and a close then resets the connection, so the typed reply can
+        be lost. So we drain -- but only up to a cap and only for a short deadline:
+        a client that declares a huge body and never sends it must still receive
+        the reply (and must not hold this thread open), while a client that really
+        is sending one gets its socket drained so the answer survives the close.
+        """
+        handler.close_connection = True
+        remaining = max(0, min(length, MAX_DRAIN_BYTES))
+        sock = getattr(handler, "connection", None)
+        previous = sock.gettimeout() if sock is not None else None
+        if remaining and sock is not None:
+            sock.settimeout(DRAIN_DEADLINE_S)
+        try:
+            while remaining > 0:
+                chunk = handler.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            if sock is not None:
+                sock.settimeout(previous)
+        self.send_json(handler, {"state": "bad_request", "state_detail": detail}, 400)
+
+    def motion_write(self, intended: dict) -> dict:
+        """GET fresh -> validate base -> merge -> PUT -> re-GET. The readback is the answer.
+
+        `write_attempted` marks a PUT that may or may not have landed (a timeout or
+        dropped connection). When it is set the reply carries whatever the camera
+        currently reads so the UI can say "may not have been saved" instead of
+        asserting an unobserved "nothing was saved".
+        """
+        intended_view = self._motion_view(
+            intended["enabled"],
+            intended["enable_highlight"],
+            intended["sensitivity"],
+            intended["cells"],
+        )
+        try:
+            base_xml = self.cam.motion_detection_xml()
+        except camera.UnreachableError:
+            return {
+                "state": "unreachable",
+                "state_detail": f"no route to {config.CAM_HOST}",
+                "write_attempted": False,
+            }
+        except camera.ServiceDownError:
+            return {
+                "state": "service_down",
+                "state_detail": "the camera did not answer the motion request",
+                "write_attempted": False,
+            }
+        except camera.BadResponseError as exc:
+            return {"state": "bad_response", "state_detail": str(exc), "write_attempted": False}
+
+        # Never merge into a document that is not a motion document we can edit:
+        # a 200 text/html login page would otherwise be rewritten and PUT back.
+        try:
+            base_doc = camera.parse_motion_detection(base_xml)
+        except camera.BadResponseError as exc:
+            return {
+                "state": "bad_response",
+                "write_attempted": False,
+                "state_detail": (
+                    "refusing to write: the camera's current reply is not a motion "
+                    f"document with an editable zone map ({exc})"
+                ),
+            }
+        # Preserve the camera's per-row padding bits from the document we read.
+        grid_map = motion.encode_gridmap(intended["cells"], base_grid_map=base_doc["gridMap"])
+
+        try:
+            merged = camera.apply_motion_fields(
+                base_xml,
+                enabled=intended["enabled"],
+                enable_highlight=intended["enable_highlight"],
+                sensitivity=intended["sensitivity"],
+                grid_map=grid_map,
+            )
+        except camera.BadResponseError as exc:
+            return {"state": "bad_response", "state_detail": str(exc), "write_attempted": False}
+
+        try:
+            self.cam.put_motion_detection(merged)
+        except camera.RejectedError as exc:
+            return {"state": "rejected", "state_detail": str(exc), "write_attempted": False}
+        except camera.UnreachableError:
+            # The request may have gone out before the connection dropped.
+            return {
+                "state": "unreachable",
+                "state_detail": f"no route to {config.CAM_HOST}",
+                "write_attempted": True,
+                "actual": self._motion_readback_safe(),
+            }
+        except camera.BadResponseError as exc:
+            # The camera answered 400/415: it understood and refused, so nothing landed.
+            return {"state": "bad_response", "state_detail": str(exc), "write_attempted": False}
+        except camera.ServiceDownError:
+            # The write may have landed despite a timeout; read back before claiming failure.
+            actual_view = self._motion_readback_safe()
+            if actual_view is not None and not motion.diff(intended_view, actual_view):
+                return self._motion_ok(intended_view, actual_view)
+            return {
+                "state": "service_down",
+                "state_detail": "the camera did not answer the write",
+                "write_attempted": True,
+                "actual": actual_view,
+            }
+        actual_view = self._motion_readback_safe()
+        if actual_view is None:
+            return {
+                "state": "bad_response",
+                "write_attempted": True,
+                "state_detail": "wrote the change but could not read it back",
+            }
+        return self._motion_ok(intended_view, actual_view)
+
+    def _motion_readback_safe(self):
+        try:
+            return self._motion_view_from_doc(self.cam.motion_detection())
+        except camera.CameraError, ValueError:
+            return None
+
+    def _motion_ok(self, intended_view, actual_view) -> dict:
+        differences = motion.diff(intended_view, actual_view)
+        return {
+            "state": "ok",
+            "match": not differences,
+            "differences": differences,
+            "intended": intended_view,
+            "actual": actual_view,
+            "state_detail": "",
+        }
+
     def send_json(self, handler, payload: dict, code: int = 200):
         body = json.dumps(payload).encode()
         handler.send_response(code)
@@ -579,6 +914,12 @@ class ViewerApp:
             return self.page_recordings(handler, query)
         if path == "/play":
             return self.page_play(handler, query)
+        if path == "/motion":
+            return self.page_motion(handler)
+        if path == "/api/motion":
+            if handler.command == "POST":
+                return self.route_motion_post(handler)
+            return self.route_motion_get(handler, query)
         if path.startswith("/hls/"):
             return self.route_hls(handler, path, query)
         if path in ("/hls-live-stop", "/hls-play-stop"):
@@ -618,12 +959,12 @@ def make_handler(app: ViewerApp):
 
         def do_POST(self):
             parsed = urlparse(self.path)
-            if parsed.path in ("/hls-live-stop", "/hls-play-stop"):
+            if parsed.path in ("/hls-live-stop", "/hls-play-stop", "/api/motion"):
                 app.dispatch(self)
             else:
                 handler = self
                 handler.send_response(405)
-                handler.send_header("Allow", "GET")
+                handler.send_header("Allow", "GET, POST")
                 handler.end_headers()
 
     return Handler

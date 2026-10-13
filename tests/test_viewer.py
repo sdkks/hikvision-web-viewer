@@ -1,11 +1,12 @@
 """Unit tests for time/URI helpers and the mock camera pipeline."""
 
+import io
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from viewer import app as viewer_app
-from viewer import camera, config, coverage, util
+from viewer import camera, config, coverage, motion, util
 
 
 class TimeTests(unittest.TestCase):
@@ -287,6 +288,502 @@ class BasicAuthTests(unittest.TestCase):
             self.assertFalse(viewer_app.check_auth(bad_user))
             self.assertTrue(viewer_app.check_auth(good))
             self.assertTrue(viewer_app.check_auth("basic " + good.split(" ", 1)[1]))
+
+
+class MotionGridTests(unittest.TestCase):
+    """Decode/encode the camera's 18x22 bit map - one source of truth (motion.py)."""
+
+    def test_all_armed_row_is_fffffc(self):
+        rows = motion.decode_gridmap("fffffc" * 18)
+        self.assertTrue(all(all(row) for row in rows))
+        self.assertEqual(motion.encode_gridmap(rows), "fffffc" * 18)
+
+    def test_empty_grid_round_trip(self):
+        self.assertEqual(motion.encode_gridmap(motion.empty_grid()), "000000" * 18)
+
+    def test_first_cell_is_the_msb(self):
+        one = motion.empty_grid()
+        one[0][0] = True
+        self.assertTrue(motion.encode_gridmap(one).startswith("800000"))
+        last = motion.empty_grid()
+        last[0][21] = True
+        self.assertTrue(motion.encode_gridmap(last).startswith("000004"))
+
+    def test_padding_bits_are_not_cells(self):
+        # The two low bits of each row are padding: setting them adds no cells.
+        rows = motion.decode_gridmap("000003" + "000000" * 17)
+        self.assertFalse(any(rows[0]))
+
+    def test_encode_preserves_padding_bits_from_base(self):
+        base = "000003" * 18  # padding bits set, no cells armed
+        rows = motion.decode_gridmap(base)
+        self.assertEqual(motion.encode_gridmap(rows), "000000" * 18)
+        self.assertEqual(motion.encode_gridmap(rows, base_grid_map=base), base)
+        rows[0][0] = True
+        self.assertEqual(motion.encode_gridmap(rows, base_grid_map=base), "800003" + "000003" * 17)
+
+    def test_vendor_worked_example(self):
+        # Worked example from Hikvision's ISAPI IPMD Service guide: 108 hex chars
+        # that decode to a person-shaped blob (row 7 cols 9-11; rows 8-10 cols
+        # 9-12, 1-based) plus a corner block (rows 15-18, cols 1-4). Locks the
+        # vendor's stated order: first cell upper-left, left-to-right, top-to-bottom.
+        vendor = (
+            "00000000000000000000000000000000000000e00000f00000f00000f000000000000000000"
+            "000000000f00000f00000f00000f00000"
+        )
+        self.assertEqual(len(vendor), motion.GRID_HEX_LEN)
+        rows = motion.decode_gridmap(vendor)
+        armed = {(r, c) for r in range(motion.ROWS) for c in range(motion.COLS) if rows[r][c]}
+        expected = (
+            {(6, 8), (6, 9), (6, 10)}
+            | {(r, c) for r in (7, 8, 9) for c in (8, 9, 10, 11)}
+            | {(r, c) for r in (14, 15, 16, 17) for c in (0, 1, 2, 3)}
+        )
+        self.assertEqual(armed, expected)
+        self.assertEqual(motion.encode_gridmap(rows), vendor)
+
+    def test_round_trip_asymmetric_pattern(self):
+        rows = motion.empty_grid()
+        rows[3][5] = rows[3][6] = rows[3][7] = True
+        rows[17][0] = True
+        self.assertEqual(motion.decode_gridmap(motion.encode_gridmap(rows)), rows)
+
+    def test_wrong_length_and_non_hex_rejected(self):
+        with self.assertRaises(ValueError):
+            motion.decode_gridmap("fff")
+        with self.assertRaises(ValueError):
+            motion.decode_gridmap("g" * 108)
+
+    def test_arm_mask_invert(self):
+        rows = motion.empty_grid()
+        motion.set_region(rows, 0, 0, 2, 3, True)
+        self.assertEqual(motion.counts(rows)["armed"], 6)
+        motion.set_region(rows, 0, 0, 2, 3, False)
+        self.assertEqual(motion.counts(rows)["armed"], 0)
+        motion.set_region(rows, 0, 0, 1, 1, True)
+        motion.invert(rows)
+        self.assertEqual(motion.counts(rows)["armed"], 396 - 1)
+
+    def test_quick_zone_is_whole_cells(self):
+        rows = motion.empty_grid()
+        motion.apply_tool_to_zone(rows, 0, 0, True)
+        self.assertEqual(motion.counts(rows)["armed"], 3 * 11)
+        self.assertTrue(rows[0][0] and rows[2][10])
+        self.assertFalse(rows[0][11])  # right half untouched
+        self.assertFalse(rows[3][0])  # next band untouched
+
+    def test_summary_counts(self):
+        rows = motion.empty_grid()
+        motion.set_region(rows, 0, 0, 18, 11, True)  # 18 x 11 = 198
+        counted = motion.counts(rows)
+        self.assertEqual(counted, {"armed": 198, "masked": 198, "total": 396})
+        self.assertEqual(motion.summary(counted), "198 of 396 cells armed (50%)")
+
+    def test_sensitivity_validation(self):
+        for value in (0, 20, 40, 60, 80, 100):
+            self.assertTrue(motion.valid_sensitivity(value))
+        for value in (55, -20, 101, "60", True, None):
+            self.assertFalse(motion.valid_sensitivity(value))
+
+    def test_diff_reports_drift(self):
+        import copy
+
+        base = {
+            "enabled": True,
+            "enable_highlight": False,
+            "sensitivity": 60,
+            "cells": motion.empty_grid(),
+        }
+        self.assertEqual(motion.diff(base, copy.deepcopy(base)), [])
+        actual = copy.deepcopy(base)
+        actual["sensitivity"] = 40
+        differences = motion.diff(base, actual)
+        self.assertEqual(len(differences), 1)
+        self.assertIn("sensitivity", differences[0])
+
+
+class MotionCameraTests(unittest.TestCase):
+    """Read-modify-write of the motionDetection document (mock round-trip)."""
+
+    def setUp(self):
+        self.cam = camera.MockCamera("http://mock", "u", "p", "rtsp://mock", 5)
+
+    def test_parse_motion_detection(self):
+        doc = self.cam.motion_detection()
+        self.assertFalse(doc["enabled"])
+        self.assertEqual(doc["sensitivityLevel"], 40)
+        self.assertEqual(doc["regionType"], "grid")
+        self.assertEqual(doc["rowGranularity"], "18")
+        self.assertEqual(doc["columnGranularity"], "22")
+        self.assertEqual(motion.validate_gridmap(doc["gridMap"]), doc["gridMap"])
+
+    def test_read_modify_write_round_trips(self):
+        merged = camera.apply_motion_fields(
+            self.cam.motion_detection_xml(),
+            enabled=True,
+            enable_highlight=True,
+            sensitivity=60,
+            grid_map="aaaaaa" * 18,
+        )
+        self.cam.put_motion_detection(merged)
+        doc = self.cam.motion_detection()
+        self.assertTrue(doc["enabled"])
+        self.assertTrue(doc["enableHighlight"])
+        self.assertEqual(doc["sensitivityLevel"], 60)
+        self.assertEqual(doc["gridMap"], "aaaaaa" * 18)
+        # Fields we do not edit survive the merge untouched.
+        self.assertEqual(doc["samplingInterval"], "2")
+        self.assertEqual(doc["regionType"], "grid")
+
+    def test_apply_registers_default_namespace(self):
+        merged = camera.apply_motion_fields(self.cam.motion_detection_xml(), enabled=True)
+        self.assertIn('xmlns="http://www.hikvision.com/ver20/XMLSchema"', merged)
+        self.assertNotIn("ns0:", merged)
+
+    def test_parse_rejects_short_grid(self):
+        bad = (
+            "<MotionDetection xmlns='http://www.hikvision.com/ver20/XMLSchema'>"
+            "<MotionDetectionLayout><layout><gridMap>short</gridMap></layout>"
+            "</MotionDetectionLayout></MotionDetection>"
+        )
+        with self.assertRaises(camera.BadResponseError):
+            camera.parse_motion_detection(bad)
+
+    def test_parse_rejects_non_xml(self):
+        with self.assertRaises(camera.BadResponseError):
+            camera.parse_motion_detection("<html>login required</html>")
+
+
+class MotionApiGuardTests(unittest.TestCase):
+    """Origin + content-type guard on the app's first mutating endpoint."""
+
+    def _handler(self, headers):
+        return mock.Mock(headers=headers)
+
+    def test_allows_same_origin_json(self):
+        handler = self._handler(
+            {
+                "Origin": "http://127.0.0.1:8756",
+                "Host": "127.0.0.1:8756",
+                "Content-Type": "application/json",
+            }
+        )
+        self.assertTrue(viewer_app.check_same_origin(handler))
+
+    def test_allows_missing_origin_json(self):
+        handler = self._handler(
+            {"Host": "127.0.0.1:8756", "Content-Type": "application/json; charset=utf-8"}
+        )
+        self.assertTrue(viewer_app.check_same_origin(handler))
+
+    def test_rejects_cross_origin(self):
+        handler = self._handler(
+            {
+                "Origin": "http://evil.example",
+                "Host": "127.0.0.1:8756",
+                "Content-Type": "application/json",
+            }
+        )
+        self.assertFalse(viewer_app.check_same_origin(handler))
+
+    def test_rejects_non_json(self):
+        handler = self._handler(
+            {"Host": "127.0.0.1:8756", "Content-Type": "application/x-www-form-urlencoded"}
+        )
+        self.assertFalse(viewer_app.check_same_origin(handler))
+
+    def test_intent_validation(self):
+        app = viewer_app.ViewerApp()
+        intent = app._motion_intent(
+            {
+                "enabled": True,
+                "enable_highlight": False,
+                "sensitivity": 40,
+                "cells": motion.empty_grid(),
+            }
+        )
+        self.assertEqual(intent["gridMap"], "000000" * 18)
+        for bad in (
+            {"cells": [[False] * 22] * 17, "sensitivity": 40},
+            {"cells": motion.empty_grid(), "sensitivity": 55},
+            {"cells": "nope", "sensitivity": 40},
+            "not-an-object",
+        ):
+            with self.assertRaises(ValueError):
+                app._motion_intent(bad)
+
+    def test_intent_rejects_non_boolean_cells(self):
+        # bool("0") is True: a truthy string must not arm a cell the caller
+        # asked to leave masked while the error promises a boolean array.
+        app = viewer_app.ViewerApp()
+        rows = motion.empty_grid()
+        rows[0][0] = "0"
+        with self.assertRaises(ValueError):
+            app._motion_intent({"cells": rows, "sensitivity": 40})
+
+    def test_rejects_rebound_host_even_when_origin_matches(self):
+        # A DNS-rebinding attacker controls both Host and Origin, so they match;
+        # the Host allowlist is what rejects the request.
+        handler = self._handler(
+            {
+                "Origin": "http://evil.example",
+                "Host": "evil.example",
+                "Content-Type": "application/json",
+            }
+        )
+        self.assertFalse(viewer_app.check_same_origin(handler))
+        self.assertIn("VIEWER_ALLOWED_HOSTS", viewer_app.motion_guard_reason(handler))
+
+    def test_accepts_loopback_host_names(self):
+        for host in ("localhost:8756", "127.0.0.1", "[::1]:8756"):
+            handler = self._handler({"Host": host, "Content-Type": "application/json"})
+            self.assertTrue(viewer_app.check_same_origin(handler), host)
+
+    def test_accepts_configured_allowed_host(self):
+        with mock.patch.object(config, "ALLOWED_HOSTS", ("cam.local",)):
+            handler = self._handler({"Host": "CAM.local:9000", "Content-Type": "application/json"})
+            self.assertTrue(viewer_app.check_same_origin(handler))
+
+    def test_rejects_media_type_substring(self):
+        handler = self._handler({"Host": "127.0.0.1", "Content-Type": "application/jsonp"})
+        self.assertFalse(viewer_app.check_same_origin(handler))
+
+
+class CameraPutMappingTests(unittest.TestCase):
+    """Camera._put maps HTTP status to the honest error classes."""
+
+    def _cam_with(self, status, text=""):
+        cam = camera.Camera("http://cam", "u", "p", "rtsp://cam", 5)
+        response = mock.Mock(status_code=status, text=text)
+        cam.session = mock.Mock()
+        cam.session.put.return_value = response
+        return cam
+
+    def test_403_is_rejected_not_service_down(self):
+        cam = self._cam_with(403, "<statusString>Invalid Operation</statusString>")
+        with self.assertRaises(camera.RejectedError):
+            cam._put("/ISAPI/x", "<body/>")
+
+    def test_400_is_bad_response(self):
+        with self.assertRaises(camera.BadResponseError):
+            self._cam_with(400, "bad")._put("/ISAPI/x", "<body/>")
+
+    def test_415_is_bad_response(self):
+        with self.assertRaises(camera.BadResponseError):
+            self._cam_with(415, "bad")._put("/ISAPI/x", "<body/>")
+
+    def test_500_is_service_down(self):
+        with self.assertRaises(camera.ServiceDownError):
+            self._cam_with(500, "boom")._put("/ISAPI/x", "<body/>")
+
+
+class _FakeCam:
+    """Camera stand-in for motion_write: no network, records the PUT body."""
+
+    def __init__(self, base_xml, *, put_error=None, readback=None):
+        self.base_xml = base_xml
+        self.put_error = put_error
+        self.readback = readback
+        self.put_body = None
+
+    def motion_detection_xml(self):
+        return self.base_xml
+
+    def motion_detection(self):
+        if isinstance(self.readback, Exception):
+            raise self.readback
+        return self.readback
+
+    def put_motion_detection(self, xml_text):
+        self.put_body = xml_text
+        if self.put_error:
+            raise self.put_error
+        return ""  # the app never reads the PUT reply body
+
+
+class _FakeBodyHandler:
+    """Minimal handler for route_motion_post: headers, request body, response sink."""
+
+    def __init__(self, headers, body=b""):
+        self.headers = headers
+        self.rfile = io.BytesIO(body)
+        self.wfile = io.BytesIO()
+        self.close_connection = False
+        self.status = None
+
+    def send_response(self, code, message=None):
+        self.status = code
+
+    def send_header(self, key, value):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+class MotionWriteTests(unittest.TestCase):
+    """motion_write across the honest states (ok, drift, timeout, rejected, bad base)."""
+
+    BASE = camera.MockCamera.MOCK_MOTION_XML
+
+    def _app(self):
+        return viewer_app.ViewerApp()
+
+    def _intent(self, app, *, enabled=True, sensitivity=60, grid=None):
+        return app._motion_intent(
+            {
+                "enabled": enabled,
+                "enable_highlight": False,
+                "sensitivity": sensitivity,
+                "cells": grid if grid is not None else motion.empty_grid(),
+            }
+        )
+
+    def _doc(self, base_xml, intended):
+        merged = camera.apply_motion_fields(
+            base_xml,
+            enabled=intended["enabled"],
+            enable_highlight=intended["enable_highlight"],
+            sensitivity=intended["sensitivity"],
+            grid_map=intended["gridMap"],
+        )
+        return camera.parse_motion_detection(merged)
+
+    def test_ok_reports_readback(self):
+        app = self._app()
+        intended = self._intent(app)
+        app.cam = _FakeCam(self.BASE, readback=self._doc(self.BASE, intended))
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "ok")
+        self.assertTrue(result["match"])
+
+    def test_drift_reports_what_the_camera_stored(self):
+        app = self._app()
+        intended = self._intent(app, sensitivity=80)
+        stored = self._intent(app, sensitivity=40)  # camera keeps its old level
+        app.cam = _FakeCam(self.BASE, readback=self._doc(self.BASE, stored))
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "ok")
+        self.assertFalse(result["match"])
+        self.assertTrue(result["differences"])
+        self.assertEqual(result["actual"]["sensitivity"], 40)
+
+    def test_timeout_but_readback_landed_is_ok(self):
+        app = self._app()
+        intended = self._intent(app)
+        app.cam = _FakeCam(
+            self.BASE,
+            put_error=camera.ServiceDownError("camera did not answer in time"),
+            readback=self._doc(self.BASE, intended),
+        )
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "ok")
+        self.assertTrue(result["match"])
+
+    def test_timeout_with_different_readback_is_unobserved(self):
+        app = self._app()
+        intended = self._intent(app, sensitivity=60)
+        current = camera.parse_motion_detection(self.BASE)  # unchanged camera state
+        app.cam = _FakeCam(
+            self.BASE,
+            put_error=camera.ServiceDownError("camera did not answer in time"),
+            readback=current,
+        )
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "service_down")
+        self.assertTrue(result["write_attempted"])
+        self.assertIsNotNone(result["actual"])
+
+    def test_timeout_with_unreadable_camera_is_unobserved(self):
+        app = self._app()
+        intended = self._intent(app)
+        app.cam = _FakeCam(
+            self.BASE,
+            put_error=camera.ServiceDownError("camera did not answer in time"),
+            readback=camera.ServiceDownError("no readback"),
+        )
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "service_down")
+        self.assertTrue(result["write_attempted"])
+        self.assertIsNone(result["actual"])
+
+    def test_rejected_writes_nothing(self):
+        app = self._app()
+        intended = self._intent(app)
+        app.cam = _FakeCam(self.BASE, put_error=camera.RejectedError("403 Invalid Operation"))
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "rejected")
+        self.assertFalse(result["write_attempted"])
+
+    def test_refuses_to_write_when_base_is_not_a_motion_document(self):
+        app = self._app()
+        intended = self._intent(app)
+        fake = _FakeCam("<html><body>login required</body></html>", readback=None)
+        app.cam = fake
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "bad_response")
+        self.assertFalse(result["write_attempted"])
+        self.assertIsNone(fake.put_body)  # the nonsensical write must never happen
+
+    def test_write_preserves_the_camera_padding_bits(self):
+        base = self.BASE.replace("ffe000" * 18, "ffffff" * 18)
+        app = self._app()
+        intended = self._intent(app)  # all masked -> cells zero, padding stays 3
+        stored = camera.parse_motion_detection(
+            camera.apply_motion_fields(
+                base,
+                enabled=intended["enabled"],
+                enable_highlight=intended["enable_highlight"],
+                sensitivity=intended["sensitivity"],
+                grid_map="000003" * 18,
+            )
+        )
+        fake = _FakeCam(base, readback=stored)
+        app.cam = fake
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "ok")
+        self.assertIsNotNone(fake.put_body)
+        self.assertIn("000003" * 18, fake.put_body)
+
+
+class MotionPostBodyTests(unittest.TestCase):
+    """Non-numeric / oversized / deeply nested POST bodies get a typed 400."""
+
+    def _app(self):
+        app = viewer_app.ViewerApp()
+        app.cam = _FakeCam(camera.MockCamera.MOCK_MOTION_XML, readback=None)
+        return app
+
+    def _handler(self, headers, body=b""):
+        return _FakeBodyHandler(headers, body)
+
+    def _json_headers(self, length):
+        return {
+            "Host": "127.0.0.1",
+            "Content-Type": "application/json",
+            "Content-Length": str(length),
+        }
+
+    def test_non_numeric_content_length_is_typed_400(self):
+        handler = self._handler(
+            {"Host": "127.0.0.1", "Content-Type": "application/json", "Content-Length": "abc"}
+        )
+        self._app().route_motion_post(handler)
+        self.assertEqual(handler.status, 400)
+        self.assertIn(b"bad_request", handler.wfile.getvalue())
+
+    def test_oversized_body_closes_and_answers_400(self):
+        handler = self._handler(self._json_headers(2_000_000))
+        self._app().route_motion_post(handler)
+        self.assertEqual(handler.status, 400)
+        self.assertTrue(handler.close_connection)
+
+    def test_deeply_nested_json_is_typed_400(self):
+        raw = ("[" * 3000 + "]" * 3000).encode()
+        handler = self._handler(self._json_headers(len(raw)), raw)
+        self._app().route_motion_post(handler)
+        self.assertEqual(handler.status, 400)
+        self.assertIn(b"bad_request", handler.wfile.getvalue())
 
 
 if __name__ == "__main__":

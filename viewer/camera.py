@@ -6,6 +6,7 @@ Error model (maps 1:1 to the UI's honest states):
   ServiceDownError     - device reachable but the asked-for app-layer service failed
                          (HTTP 403/500, timeout-after-connect, unparseable reply)
   BadResponseError     - unexpected reply shape (protocol drift)
+  RejectedError        - the camera understood us and said no (403 Invalid Operation)
 """
 
 import re
@@ -16,7 +17,10 @@ from xml.etree import ElementTree
 import requests
 from requests.auth import HTTPDigestAuth
 
-from . import config, util
+from . import config, motion, util
+
+MOTION_PATH = "/ISAPI/System/Video/inputs/channels/1/motionDetection"
+MOTION_XMLNS = "http://www.hikvision.com/ver20/XMLSchema"
 
 
 class CameraError(Exception):
@@ -33,6 +37,12 @@ class ServiceDownError(CameraError):
 
 class BadResponseError(CameraError):
     pass
+
+
+class RejectedError(CameraError):
+    """The camera replied, understood the request, and refused it (e.g. 403
+    Invalid Operation). Deliberately distinct from ServiceDownError so 'the
+    camera said no' never reads as 'the camera is down'."""
 
 
 @dataclass(frozen=True)
@@ -89,6 +99,39 @@ class Camera:
         if r.status_code == 200:
             return r.text
         raise ServiceDownError(f"{path} -> HTTP {r.status_code}")
+
+    def _put(self, path: str, body: str, content_type: str = "application/xml") -> str:
+        """PUT an ISAPI body; distinct errors for 'refused' vs 'down' vs 'drift'."""
+        try:
+            r = self.session.put(
+                self.base + path,
+                data=body.encode("utf-8"),
+                headers={"Content-Type": content_type},
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            raise _classify_requests_error(exc) from exc
+        if r.status_code == 200:
+            return r.text
+        if r.status_code == 403:
+            detail = _xml_text(r.text, "statusString") or (r.text or "").strip()[:200]
+            raise RejectedError(f"{path} -> HTTP 403 Invalid Operation: {detail}")
+        if r.status_code in (400, 415):
+            raise BadResponseError(f"{path} -> HTTP {r.status_code} (rejected or malformed body)")
+        raise ServiceDownError(f"{path} -> HTTP {r.status_code}")
+
+    # ── motion detection (read-modify-write) ─────────────────────────────
+    def motion_detection_xml(self) -> str:
+        """Raw ISAPI document; callers merge our fields into THIS document."""
+        return self._get(MOTION_PATH)
+
+    def motion_detection(self) -> dict:
+        """Parsed current zone config (raises BadResponseError on shape drift)."""
+        return parse_motion_detection(self.motion_detection_xml())
+
+    def put_motion_detection(self, xml_text: str) -> str:
+        """PUT the full merged document (never a hand-built minimal body)."""
+        return self._put(MOTION_PATH, xml_text, "application/xml")
 
     # ── info endpoints ───────────────────────────────────────────────────
     def device_info(self) -> dict:
@@ -237,6 +280,40 @@ class MockCamera(Camera):
     def stream_resolution(self, channel: str) -> tuple[int, int] | None:
         return (1280, 720) if channel.endswith("1") else (640, 360)
 
+    # Mock camera state round-trips so mock mode exercises the whole editor flow.
+    # Initial pattern: left half armed (c < 11) on every row, right half masked.
+    MOCK_MOTION_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<MotionDetection version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
+        "<enabled>false</enabled>\n"
+        "<enableHighlight>false</enableHighlight>\n"
+        "<samplingInterval>2</samplingInterval>\n"
+        "<startTriggerTime>500</startTriggerTime>\n"
+        "<endTriggerTime>500</endTriggerTime>\n"
+        "<regionType>grid</regionType>\n"
+        "<Grid><rowGranularity>18</rowGranularity>"
+        "<columnGranularity>22</columnGranularity></Grid>\n"
+        '<MotionDetectionLayout version="2.0" '
+        'xmlns="http://www.hikvision.com/ver20/XMLSchema">\n'
+        "<sensitivityLevel>40</sensitivityLevel>\n"
+        "<layout><gridMap>" + "ffe000" * 18 + "</gridMap></layout>\n"
+        "</MotionDetectionLayout>\n"
+        "</MotionDetection>"
+    )
+
+    def motion_detection_xml(self) -> str:
+        if getattr(self, "_motion_xml", None) is None:
+            self._motion_xml = self.MOCK_MOTION_XML
+        return self._motion_xml
+
+    def put_motion_detection(self, xml_text: str) -> str:
+        parse_motion_detection(xml_text)  # validate shape like the real device would
+        self._motion_xml = xml_text
+        return (
+            "<ResponseStatus><statusCode>1</statusCode>"
+            "<statusString>OK</statusString></ResponseStatus>"
+        )
+
     def search(self, iso_from: str, iso_to: str, max_results: int = 100) -> list[Clip]:
         uri = self.MOCK_CLIP.format(host=config.CAM_HOST)
         fields = util.clip_fields(uri)
@@ -376,6 +453,133 @@ def _xml_text(xml: str, tag: str) -> str:
 def _int_text(xml: str, tag: str) -> int:
     value = _xml_text(xml, tag)
     return int(value) if value.isdigit() else 0
+
+
+# ── motion detection XML ─────────────────────────────────────────────────────
+
+
+def _root_namespace(root) -> str:
+    return root.tag[1:].split("}", 1)[0] if root.tag.startswith("{") else ""
+
+
+def _find_descendant(root, local_name):
+    """First descendant with this local name, ignoring namespace/attributes."""
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] == local_name:
+            return element
+    return None
+
+
+def _find_child(parent, local_name):
+    for element in list(parent):
+        if element.tag.rsplit("}", 1)[-1] == local_name:
+            return element
+    return None
+
+
+def _element_text(root, local_name: str) -> str:
+    element = _find_descendant(root, local_name)
+    return (element.text or "").strip() if element is not None else ""
+
+
+def _set_child(parent, local_name: str, value: str, ns: str):
+    element = _find_child(parent, local_name)
+    if element is None:
+        element = ElementTree.SubElement(parent, f"{{{ns}}}{local_name}" if ns else local_name)
+    element.text = value
+    return element
+
+
+def _ensure_path(root, path: list[str], ns: str):
+    parent = root
+    for local_name in path:
+        child = _find_child(parent, local_name)
+        if child is None:
+            child = ElementTree.SubElement(parent, f"{{{ns}}}{local_name}" if ns else local_name)
+        parent = child
+    return parent
+
+
+def _register_namespaces(xml_text: str, root_ns: str) -> None:
+    """Preserve the camera's own prefixes so ElementTree never invents ns0:.
+
+    Registering the default namespace is what makes the camera accept our PUT:
+    without it the serialiser emits ns0: prefixes and the device answers HTTP 400.
+    """
+    for prefix, uri in re.findall(r'xmlns:([A-Za-z_][\w.\-]*)="([^"]+)"', xml_text):
+        ElementTree.register_namespace(prefix, uri)
+    if root_ns:
+        ElementTree.register_namespace("", root_ns)
+
+
+def parse_motion_detection(xml_text: str) -> dict:
+    """Parse a /System/Video/inputs/channels/1/motionDetection reply.
+
+    Raises BadResponseError when the grid shape is not the 18x22 bit map we can
+    safely decode - the editor then refuses to edit rather than misreport.
+    """
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError as exc:
+        raise BadResponseError(f"motion detection reply is not XML: {exc}") from exc
+    grid_map = _element_text(root, "gridMap")
+    if not grid_map:
+        raise BadResponseError("motion detection reply has no <gridMap>")
+    try:
+        motion.validate_gridmap(grid_map)
+    except ValueError as exc:
+        raise BadResponseError(f"unexpected zone format: {exc}") from exc
+    try:
+        sensitivity = int(_element_text(root, "sensitivityLevel") or 0)
+    except ValueError:
+        sensitivity = 0
+    return {
+        "enabled": _element_text(root, "enabled").lower() == "true",
+        "enableHighlight": _element_text(root, "enableHighlight").lower() == "true",
+        "samplingInterval": _element_text(root, "samplingInterval"),
+        "startTriggerTime": _element_text(root, "startTriggerTime"),
+        "endTriggerTime": _element_text(root, "endTriggerTime"),
+        "regionType": _element_text(root, "regionType"),
+        "rowGranularity": _element_text(root, "rowGranularity"),
+        "columnGranularity": _element_text(root, "columnGranularity"),
+        "sensitivityLevel": sensitivity,
+        "gridMap": grid_map,
+    }
+
+
+def apply_motion_fields(
+    xml_text: str,
+    *,
+    enabled: bool | None = None,
+    enable_highlight: bool | None = None,
+    sensitivity: int | None = None,
+    grid_map: str | None = None,
+) -> str:
+    """Merge our edited fields into a document the camera already returned and
+    serialise the FULL document back (preserving everything we do not edit).
+
+    Read-modify-write: never hand-build a minimal body.
+    """
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError as exc:
+        raise BadResponseError(f"cannot merge into malformed motion document: {exc}") from exc
+    ns = _root_namespace(root)
+    if enabled is not None:
+        _set_child(root, "enabled", "true" if enabled else "false", ns)
+    if enable_highlight is not None:
+        _set_child(root, "enableHighlight", "true" if enable_highlight else "false", ns)
+    if sensitivity is not None:
+        layout_root = _ensure_path(root, ["MotionDetectionLayout"], ns)
+        _set_child(layout_root, "sensitivityLevel", str(int(sensitivity)), ns)
+    if grid_map is not None:
+        motion.validate_gridmap(grid_map)
+        layout = _ensure_path(root, ["MotionDetectionLayout", "layout"], ns)
+        _set_child(layout, "gridMap", grid_map, ns)
+    if root.get("version") is None:
+        root.set("version", "2.0")
+    _register_namespaces(xml_text, ns)
+    return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
 
 
 def make_camera() -> Camera:

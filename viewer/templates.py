@@ -15,13 +15,14 @@ BASE = Template("""<!doctype html>
 <nav class="tabs" aria-label="Sections">
 <a href="/" aria-current="$nav_live">Live</a>
 <a href="/recordings" aria-current="$nav_rec">Recording Files</a>
+<a href="/motion" aria-current="$nav_motion">Motion</a>
 </nav></header>
 <main>
 $content
 </main>
 <footer class="foot"><span>$footer</span><span>Advanced: <a href="/isapi/System/deviceInfo">raw ISAPI</a></span></footer>
 <script src="/static/vendor/hls.light.min.js"></script>
-<script src="/static/app.js?v=8"></script>
+<script src="/static/app.js?v=9"></script>
 </body>
 </html>
 """)
@@ -122,4 +123,96 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <div><h3>Later</h3><ul class="jumps" id="later"></ul></div>
 </div>
 </section>
+""")
+
+MOTION = Template("""<h1>Motion detection</h1>
+<p id="motion-status" class="status" role="status"><span class="dot spin"></span><span class="label">Reading the camera&hellip;</span></p>
+<section id="motion-dirty" class="dirtybar" hidden>
+<p id="motion-dirty-text">Unsaved changes.</p>
+<div class="row">
+<button type="button" id="motion-apply-top" class="searchbtn">Apply to camera</button>
+<button type="button" id="motion-discard-top" class="copybtn">Discard changes</button>
+</div>
+</section>
+<div id="motion-error" class="errcard" hidden></div>
+<noscript><div class="errcard"><p>Editing motion zones needs JavaScript. This page is read-only without it.</p>$ssr_summary</div></noscript>
+<section class="zonecard">
+<div class="zoneviewport" id="zone-viewport">
+<div class="zonecanvas" id="zone-canvas">
+<img id="zone-photo" src="/snapshot?ch=101" alt="Camera still frame used to place motion zones">
+<div class="zonegrid" id="zone-grid" role="grid" aria-label="Motion zones, 18 rows by 22 columns" aria-rowcount="18" aria-colcount="22" tabindex="0" aria-activedescendant="zc-0-0"></div>
+</div>
+</div>
+<p class="legend"><span><span class="swatch armed"></span>armed &mdash; motion here triggers</span><span><span class="swatch masked"></span>masked &mdash; ignored</span><span><span class="swatch cursor"></span>cursor</span></p>
+<p class="muted" id="zone-hint" hidden>Zoom in to edit individual cells.</p>
+</section>
+<section class="zonequickcontrols" aria-label="Zone controls">
+<fieldset class="zgroup">
+<legend>Detection</legend>
+<label class="ztoggle"><input type="checkbox" id="motion-enabled"> Motion detection on</label>
+<p class="muted" id="motion-off-note" hidden>Motion detection is off &mdash; these zones do nothing until you turn it on.</p>
+</fieldset>
+<fieldset class="zgroup">
+<legend>Tool</legend>
+<div class="segmented" id="tool-group" role="group" aria-label="Paint tool">
+<button type="button" class="segbtn" data-tool="arm" aria-pressed="true">Arm</button>
+<button type="button" class="segbtn" data-tool="mask" aria-pressed="false">Mask</button>
+</div>
+</fieldset>
+<fieldset class="zgroup">
+<legend>Brush</legend>
+<div class="segmented" id="brush-group" role="group" aria-label="Brush size">
+<button type="button" class="segbtn" data-brush="1" aria-pressed="true">1&times;</button>
+<button type="button" class="segbtn" data-brush="2" aria-pressed="false">2&times;</button>
+<button type="button" class="segbtn" data-brush="3" aria-pressed="false">3&times;</button>
+</div>
+</fieldset>
+</section>
+<details class="zonecontrols" id="zone-secondary" open>
+<summary>More controls &mdash; sensitivity, zoom &amp; bulk</summary>
+<fieldset class="zgroup">
+<legend>Live picture</legend>
+<label class="ztoggle"><input type="checkbox" id="motion-highlight"> Show armed areas on the live picture</label>
+</fieldset>
+<fieldset class="zgroup">
+<legend>Sensitivity</legend>
+<div class="segmented" id="sens-group" role="group" aria-label="Sensitivity"></div>
+</fieldset>
+<fieldset class="zgroup">
+<legend>View</legend>
+<div class="segmented" id="mode-group" role="group" aria-label="Pointer mode">
+<button type="button" class="segbtn" data-mode="paint" aria-pressed="true">Paint</button>
+<button type="button" class="segbtn" data-mode="pan" aria-pressed="false">Pan</button>
+</div>
+<div class="zoomrow">
+<button type="button" class="copybtn" id="zoom-out" aria-label="Zoom out">&minus;</button>
+<button type="button" class="copybtn" id="zoom-fit">Fit</button>
+<button type="button" class="copybtn" id="zoom-in" aria-label="Zoom in">&plus;</button>
+<span class="muted" id="zoom-readout">Fit</span>
+</div>
+</fieldset>
+<fieldset class="zgroup">
+<legend>Bulk</legend>
+<div class="bulkrow">
+<button type="button" class="copybtn" id="arm-all">Arm all</button>
+<button type="button" class="copybtn" id="mask-all">Mask all</button>
+<button type="button" class="copybtn" id="invert-all">Invert</button>
+<button type="button" class="copybtn" id="undo" disabled>Undo</button>
+<button type="button" class="copybtn" id="redo" disabled>Redo</button>
+<button type="button" class="copybtn" id="toggle-photo">Hide photo</button>
+</div>
+</fieldset>
+<p class="honest">Keys: a / m tool &middot; i invert &middot; + / &minus; / 0 zoom &middot; Ctrl+Z / Ctrl+Shift+Z undo/redo &middot; arrows + Space on the grid.</p>
+</details>
+<p class="muted warnnote" id="motion-warn" hidden></p>
+<p class="zoneprimary">
+<button type="button" id="motion-apply" class="searchbtn">Apply to camera</button>
+<button type="button" id="motion-discard" class="copybtn" hidden>Discard changes</button>
+</p>
+<section class="zonecoarse">
+<h2>Quick zones</h2>
+<div class="zonecoarsemap" id="zone-coarse" role="group" aria-label="Quick zones, 2 columns by 6 rows"></div>
+<p id="zone-summary" class="muted" aria-live="polite"></p>
+</section>
+<div id="motion-endnote" class="endnote" hidden></div>
 """)

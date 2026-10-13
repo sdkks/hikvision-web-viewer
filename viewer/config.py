@@ -23,6 +23,16 @@ AUTH_USER = os.environ.get("VIEWER_AUTH_USER", "")
 AUTH_PASSWORD = os.environ.get("VIEWER_AUTH_PASSWORD", "")
 BIND_HOST = os.environ.get("VIEWER_BIND", "127.0.0.1")
 BIND_PORT = _int("VIEWER_PORT", 8756)
+# Extra host names the viewer accepts in the Host header, for LAN access or a
+# reverse proxy whose Host is not loopback. Comma-separated, case-insensitive;
+# ports are ignored when matching. Loopback names and a specific BIND_HOST are
+# always accepted, so this is only needed when the viewer is reached by another
+# name (see the DNS-rebinding note in app.py).
+ALLOWED_HOSTS = tuple(
+    host.strip().lower()
+    for host in os.environ.get("VIEWER_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+)
 CAM_BASE = f"http://{CAM_HOST}:{HTTP_PORT}"
 RTSP_BASE = f"rtsp://{CAM_HOST}:{RTSP_PORT}"
 ISAPI_TIMEOUT = 8.0
