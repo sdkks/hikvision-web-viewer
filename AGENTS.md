@@ -50,7 +50,7 @@ Browser: static/app.js (hls.js) ────────────────
 | `scripts/ci-smoke.sh` | Integration smoke test used by CI (mock session, HLS, stop, no-ffmpeg) |
 | `.github/workflows/ci.yml` | Gates on ubuntu-26.04 amd64 + arm64 |
 | `.github/workflows/container.yml` | Multi-arch container publish to GHCR on tags |
-| `Makefile` | setup / gates / run-mock / docker-build / docker-publish |
+| `Makefile` | setup / gates / typecheck / run-mock / docker-build / docker-publish |
 | `.envrc` | direnv: activates `.venv` and sources `config.env` if present |
 
 ---
@@ -192,7 +192,7 @@ All configuration is environment-based (`viewer/config.py`):
 
 ```bash
 make setup
-.venv/bin/pre-commit install            # gitleaks, ruff, format, unittest, commit-msg
+.venv/bin/pre-commit install            # gitleaks, ruff, mypy, format, unittest, commit-msg
 cp config.env.example config.env       # then edit credentials
 ```
 
@@ -208,6 +208,7 @@ Gates (all must pass before committing):
 
 ```bash
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
+.venv/bin/python -m mypy --config-file pyproject.toml
 .venv/bin/python -B -m unittest discover -s tests
 .venv/bin/pre-commit run -a
 ```
@@ -288,7 +289,9 @@ These caused real bugs and hours of confusion. Take them seriously.
    assert afterwards.
 3. **A missing `def` can coexist with a caller for a while** (e.g. a route
    calling `self.route_static(...)` with the method absent). `ruff` will not
-   catch it; only hitting the route will. Exercise new routes once.
+   catch it, but `mypy` will: with `check_untyped_defs` on, a dangling call in an
+   unannotated dispatcher is `[attr-defined]`. Run `make typecheck`. Still
+   exercise new routes once — type checking cannot prove runtime wiring.
 4. **Delete stale `__pycache__` if behaviour looks impossible** — same-second
    edits can defeat bytecode validation on some setups.
 5. **Process hygiene**: never `kill -9` the server and walk away in testing —

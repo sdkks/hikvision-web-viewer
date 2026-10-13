@@ -202,9 +202,10 @@ closed, and idle sessions are reaped automatically. On a weak NAS CPU, set
 ## Development
 
 ```bash
-.venv/bin/pre-commit install          # gitleaks, ruff, unittest, conventional commits
+.venv/bin/pre-commit install          # gitleaks, ruff, mypy, unittest, conventional commits
 .venv/bin/python -B -m unittest discover -s tests -v
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
+.venv/bin/python -m mypy --config-file pyproject.toml
 ```
 
 Layout: `viewer/camera.py` (ISAPI client + error model), `viewer/streams.py` (ffmpeg sessions),
