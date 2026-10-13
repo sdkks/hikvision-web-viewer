@@ -170,23 +170,41 @@ def play_key(from_cam: str, to_cam: str) -> str:
 
 
 def _kill_orphans(directory: Path) -> None:
-    """Kill leftover ffmpeg processes from a previous server run that still
-    write into this session directory (they outlive their parent otherwise)."""
-    subprocess.run(["pkill", "-9", "-f", str(directory)], check=False, capture_output=True)
+    """Best-effort: kill leftover ffmpeg processes writing into this session dir.
+
+    Belt and braces only — the parent watchdog already guarantees children die
+    with the server. `pkill` may be absent (minimal container images), so never
+    let this failure break a session start.
+    """
+    try:
+        subprocess.run(["pkill", "-9", "-f", str(directory)], check=False, capture_output=True)
+    except OSError:
+        pass  # no pkill here; the watchdog covers orphan cleanup
 
 
 def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> dict:
     """Spawn ffmpeg under a watchdog shell.
 
-    The watchdog exits when the server process dies and SIGKILLs ffmpeg, so a
-    crashed/killed server can never leave encoder orphans behind (macOS has no
-    PDEATHSIG). Runs in its own session so the group can be killed atomically.
+    The watchdog supervises ffmpeg:
+      - if the server process dies, it SIGKILLs and reaps ffmpeg (macOS has no
+        PDEATHSIG), so a crashed server cannot leave encoder orphans behind;
+      - on TERM/INT it kills and reaps its child before exiting, so no zombie
+        is reparented to PID 1 (which in a container is this app and never
+        reaps stray children).
+    Runs in its own session so the group can be killed atomically.
     """
     err_log = open(directory / "ffmpeg-stderr.log", "ab")
     watchdog = (
-        'parent=$PPID; "$@" & child=$!; '
-        'while kill -0 "$parent" 2>/dev/null; do sleep 2; done; '
-        'kill -9 "$child" 2>/dev/null; wait "$child" 2>/dev/null'
+        'child=""; '
+        'reap() { if [ -n "$child" ]; then kill -9 "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; }; '
+        'trap "reap; exit 143" TERM INT HUP; '
+        "parent=$PPID; "
+        '"$@" & child=$!; '
+        'while kill -0 "$parent" 2>/dev/null; do '
+        '  kill -0 "$child" 2>/dev/null || { wait "$child" 2>/dev/null; exit 0; }; '
+        "  sleep 2; "
+        "done; "
+        "reap"
     )
     wrapped = ["/bin/sh", "-c", watchdog, "ffmpeg-watchdog"] + cmd
     return {

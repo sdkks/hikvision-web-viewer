@@ -1,17 +1,19 @@
-version: "3.8"
-
 services:
   camera-viewer:
     build:
       context: .
       dockerfile: Containerfile
+    image: sdkks/hikvision-web-viewer:local
     container_name: hikvision-web-viewer
     restart: unless-stopped
     ports:
       - "8756:8756"
     env_file:
       - config.env
-    # Optional overrides (config.env values are loaded first; these win):
-    # environment:
-    #   HIK_MOCK: "1"                  # built-in fixtures, no camera needed
-    #   VIEWER_DEFAULT_CHANNEL: "102"  # weak NAS CPU? default to the 360p sub channel
+    environment:
+      # Reachable from the LAN / other devices; credentials come from config.env.
+      VIEWER_BIND: 0.0.0.0
+      # Weak NAS CPU? Prefer the 360p sub channel as the default live view:
+      # VIEWER_DEFAULT_CHANNEL: "102"
+      # Offline demo without a camera:
+      # HIK_MOCK: "1"

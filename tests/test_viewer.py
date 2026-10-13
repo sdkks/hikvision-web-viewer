@@ -105,6 +105,17 @@ class IsoToCamTests(unittest.TestCase):
         self.assertEqual(camera._iso_to_cam("not-a-date"), "")
 
 
+class OrphanCleanupTests(unittest.TestCase):
+    def test_missing_pkill_does_not_raise(self):
+        """Minimal container images have no pkill; session start must survive."""
+        from pathlib import Path
+
+        from viewer import streams
+
+        with mock.patch("viewer.streams.subprocess.run", side_effect=FileNotFoundError("pkill")):
+            streams._kill_orphans(Path("/tmp/whatever"))  # must not raise
+
+
 class BasicAuthTests(unittest.TestCase):
     """Viewer-side HTTP Basic Auth: active only when both env vars are set."""
 
