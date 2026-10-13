@@ -110,6 +110,15 @@ default: a viewer that shows an all-masked zone map before (or without) a
 successful read is worse than one showing nothing, because the wrong answer
 looks exactly like a real one.
 
+**Clip position is never derived from `<video>.currentTime`.** The playback
+playlist is live-ish (`-hls_list_size`), so `currentTime`/`duration` do not map
+to clip time — a width read from them is a fabricated position. Progress comes
+from wall-clock elapsed time since the session started playing, is displayed as
+an estimate (`≈`), and is hidden whenever playback is not actively running. The
+same applies to restarting: the camera cannot seek inside a session, so "go to a
+time" is a new `/play` navigation (which is also why browser Back can undo it),
+and it lands on the nearest keyframe before the requested time.
+
 ### 4. The coverage picker stays honest
 
 `/api/coverage?date=YYYY-MM-DD` runs **one search per day** and returns

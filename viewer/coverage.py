@@ -131,3 +131,100 @@ def build_coverage(clips, day_start: datetime) -> dict:
         "ranges": ranges,
         "files": files,
     }
+
+
+def clip_to_window(files: list[dict], from_epoch: int, to_epoch: int) -> list[tuple[int, int]]:
+    """Clip recorded file intervals to [from_epoch, to_epoch], merged and sorted.
+
+    The play page's restart bar needs second-precision covered spans, so it uses
+    the file list (never the coarse whole-minute buckets) intersected with the
+    window the player was asked to play.
+    """
+    spans = []
+    for f in files:
+        start = max(int(f["start_epoch"]), int(from_epoch))
+        end = min(int(f["end_epoch"]), int(to_epoch))
+        if end > start:
+            spans.append((start, end))
+    return _merge_spans(spans)
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping or touching (start, end) epoch spans into disjoint ones."""
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def epoch_pct(epoch: int, from_epoch: int, to_epoch: int) -> float:
+    """Map an epoch second to a 0..100 offset within [from_epoch, to_epoch]."""
+    span = to_epoch - from_epoch
+    if span <= 0:
+        return 0.0
+    return round(min(100.0, max(0.0, (epoch - from_epoch) / span * 100.0)), 4)
+
+
+def nearest_epoch(
+    segments: list[tuple[int, int]], target_epoch: int, from_epoch: int, to_epoch: int
+) -> int | None:
+    """Nearest instant inside a covered segment to target; None when nothing is covered.
+
+    Used to snap a restart target out of a gap (mirrors the picker's
+    snap-to-covered behaviour). Returns an epoch clamped to the window.
+    """
+    best: int | None = None
+    best_dist: int | None = None
+    for start, end in segments:
+        point = start if target_epoch < start else end if target_epoch > end else target_epoch
+        dist = abs(point - target_epoch)
+        if best_dist is None or dist < best_dist:
+            best, best_dist = point, dist
+    if best is None:
+        return None
+    return int(min(max(best, from_epoch), to_epoch))
+
+
+def window_eligibility(files: list[dict], from_epoch: int, to_epoch: int) -> dict:
+    """Eligible sub-intervals of a clip window plus the gaps between them.
+
+    Pure geometry behind the play page's restart bar: clip the day's recorded
+    files to [from_epoch, to_epoch], merge them, and describe what is covered,
+    what is a gap, and the nearest eligible instant to the window start. The
+    whole window being a gap is a real state (no covered instant) that the UI
+    must not confuse with "coverage couldn't be checked".
+    """
+    from_epoch, to_epoch = int(from_epoch), int(to_epoch)
+    segments = clip_to_window(files, from_epoch, to_epoch)
+
+    gaps: list[dict] = []
+    cursor = from_epoch
+    for start, end in segments:
+        if start > cursor:
+            gaps.append({"start_epoch": cursor, "end_epoch": start})
+        cursor = max(cursor, end)
+    if cursor < to_epoch:
+        gaps.append({"start_epoch": cursor, "end_epoch": to_epoch})
+
+    out_segments = [
+        {
+            "start_epoch": start,
+            "end_epoch": end,
+            "start_pct": epoch_pct(start, from_epoch, to_epoch),
+            "end_pct": epoch_pct(end, from_epoch, to_epoch),
+        }
+        for start, end in segments
+    ]
+    target = nearest_epoch(segments, from_epoch, from_epoch, to_epoch)
+    return {
+        "from_epoch": from_epoch,
+        "to_epoch": to_epoch,
+        "segments": out_segments,
+        "gaps": gaps,
+        "covered_s": sum(end - start for start, end in segments),
+        "has_eligible": bool(segments),
+        "target_epoch": target if target is not None else from_epoch,
+    }

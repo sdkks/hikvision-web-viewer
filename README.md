@@ -14,6 +14,12 @@ Shows live view and recorded clips in the browser, honest about what the camera 
   merged document and then **reads it back** — the page reports what the camera stored, and says so
   when the camera changes or ignores something. Zones can be painted while detection is off, with
   the page stating plainly that they do nothing until it is on.
+- **Restart from anywhere in a clip** — the player carries a bar spanning the clip, shaded with what
+  was actually recorded (reusing the picker's coverage vocabulary, with an explicit "couldn't check"
+  state), so you can see where video exists. Drag or tap to preview, then **Restart here** to begin a
+  new session from that time; browser Back returns you to where you were. It is deliberately not a
+  seek — the camera plays linearly and cannot seek inside a session, and it starts at the nearest
+  keyframe before the time you pick (a few seconds earlier).
 - **Jump between clips** — the player lists the five earlier and five later recordings, each labelled
   with the gap a jump would skip (so a jump across missing time never looks continuous), and can
   chain to the next recording automatically. That auto-advance is opt-in, counted down visibly, and
@@ -116,6 +122,9 @@ JavaScript or not.
 ## Notes on honesty (by design)
 
 - Playback runs at the camera's tempo: a 20-minute clip takes 20 minutes; there is no seeking.
+  The player's position readout is therefore an **estimate** (`≈`), derived from wall-clock playback
+  time, and it is hidden while playback is paused or stalled rather than showing a confident number;
+  it can run a few seconds ahead of the picture, because the browser buffers behind the stream.
 - The camera allows **one** playback session; starting a new one takes over the old.
 - Recording search is served by the camera's app layer, which on some firmware is unreliable —
   the UI names that state instead of pretending it is "no clips".

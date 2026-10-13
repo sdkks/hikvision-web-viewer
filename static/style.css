@@ -46,6 +46,9 @@
 
   --radius: 8px;
   --pill: 22px;
+  /* "now" caret on the restart bar; its line+caret shape carries the meaning,
+     so the token is a reinforcement, not the only cue. */
+  --rb-now: var(--ok);
   color-scheme: light;
 }
 
@@ -344,28 +347,48 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 
 .scrubwrap { margin: 12px 0 4px; }
 
-#scrubber {
+#scrubber, #restart-scrubber {
   -webkit-appearance: none; appearance: none;
   width: 100%; height: 44px; background: transparent; display: block;
   --track: var(--inset);
+  touch-action: pan-y; /* horizontal scrub, vertical page scroll */
 }
-#scrubber::-webkit-slider-runnable-track {
+#scrubber::-webkit-slider-runnable-track,
+#restart-scrubber::-webkit-slider-runnable-track {
   height: 22px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--track);
 }
-#scrubber::-webkit-slider-thumb {
+#scrubber::-webkit-slider-thumb,
+#restart-scrubber::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
   width: 18px; height: 36px; margin-top: -8px; border-radius: 4px;
   background: var(--surface); border: 3px solid var(--accent);
   box-shadow: 0 1px 2px rgba(43, 36, 25, .35);
 }
-#scrubber::-moz-range-track {
+#scrubber::-moz-range-track,
+#restart-scrubber::-moz-range-track {
   height: 22px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--track);
 }
-#scrubber::-moz-range-thumb {
+#scrubber::-moz-range-thumb,
+#restart-scrubber::-moz-range-thumb {
   width: 16px; height: 34px; border-radius: 4px;
   background: var(--surface); border: 3px solid var(--accent);
 }
-#scrubber:disabled { opacity: .5; }
+#scrubber:disabled, #restart-scrubber:disabled { opacity: .5; }
+
+/* Unknown coverage: the picker's .hour-tile.unknown treatment as a track —
+   dashed warn edge plus the err hatch — so it never looks like "all gap". */
+#restart-scrubber.unknown {
+  --track:
+    repeating-linear-gradient(45deg, rgba(156, 51, 37, .14) 0 2px, transparent 2px 7px),
+    repeating-linear-gradient(-45deg, rgba(156, 51, 37, .14) 0 2px, transparent 2px 7px),
+    var(--surface);
+}
+#restart-scrubber.unknown::-webkit-slider-runnable-track {
+  border-style: dashed; border-color: var(--warn);
+}
+#restart-scrubber.unknown::-moz-range-track {
+  border-style: dashed; border-color: var(--warn);
+}
 
 .files { display: grid; gap: 8px; margin: 6px 0 4px; }
 .file-row {
@@ -392,9 +415,33 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 /* ── playback page ─────────────────────────────────────────────── */
 .back { display: inline-block; min-height: 44px; padding: 10px 4px; }
 
-.progresswrap { height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; margin: 8px 0; }
-.progress { height: 100%; width: 0%; background: var(--accent); transition: width 1s linear; }
-@media (prefers-reduced-motion: reduce) { .progress { transition: none; } }
+/* Restart-from-timestamp bar (clip-local). */
+.restartbar { margin: 10px 0 4px; }
+.restartbar-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 4px 12px; flex-wrap: wrap;
+}
+.restartbar-label { font-weight: 600; }
+.restartbar-trackwrap { position: relative; margin-top: 2px; }
+.restartbar-readout { margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+.restartbar-legend { margin: 6px 0 2px; }
+.restartbar-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 2px; }
+
+/* "now" position estimate: a thin line plus a caret, so the marker is not
+   carried by colour alone. */
+.rb-now {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  height: 22px; width: 2px; background: var(--rb-now); pointer-events: none;
+}
+.rb-now::after {
+  content: ""; position: absolute; top: -6px; left: -4px;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 6px solid var(--rb-now);
+}
+
+@media (min-width: 720px) {
+  .restartbar-head { align-items: center; }
+}
 
 .endnote { border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius); padding: 12px 14px; margin-top: 12px; }
 .endnote.warn { border-color: var(--warn); }

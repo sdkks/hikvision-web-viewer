@@ -356,10 +356,8 @@ class ViewerApp:
                 code=400,
             )
             return
-        # Match the JS counter format: h:mm:ss once over an hour, m:ss below.
-        m, secs = divmod(dur_s, 60)
-        h, m = divmod(m, 60)
-        dur_mmss = f"{h}:{m:02d}:{secs:02d}" if h else f"{m}:{secs:02d}"
+        # Clip duration/size are passed to the client for the restart bar; the
+        # position readout is derived from wall-clock in JS, not from video time.
         size_raw = (query.get("size", [""])[0] or "").strip()
         size = int(size_raw) if size_raw.isdigit() else 0
         size_part = f" &middot; {util.human_size(size)}" if size else ""
@@ -371,7 +369,9 @@ class ViewerApp:
             dur_s=dur_s,
             from_cam=esc(from_cam),
             to_cam=esc(to_cam),
-            dur_mmss=dur_mmss,
+            from_epoch=int(start_dt.timestamp()),
+            to_epoch=int(end_dt.timestamp()),
+            size_raw=size,
         )
         self.render(handler, "Playback", content, nav="recordings")
 
@@ -593,6 +593,12 @@ class ViewerApp:
             built = coverage.build_coverage(clips, day_start)
             payload.update(
                 coverage.neighbours(built["files"], int(start.timestamp()), int(end.timestamp()))
+            )
+            # The restart bar's eligible sub-intervals for this exact clip window,
+            # clipped from the same day search this handler already ran so the
+            # play page never triggers a second camera search.
+            payload["window"] = coverage.window_eligibility(
+                built["files"], int(start.timestamp()), int(end.timestamp())
             )
         self.send_json(handler, payload)
 

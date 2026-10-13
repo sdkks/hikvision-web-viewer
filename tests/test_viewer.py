@@ -1,6 +1,7 @@
 """Unit tests for time/URI helpers and the mock camera pipeline."""
 
 import io
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -784,6 +785,125 @@ class MotionPostBodyTests(unittest.TestCase):
         self._app().route_motion_post(handler)
         self.assertEqual(handler.status, 400)
         self.assertIn(b"bad_request", handler.wfile.getvalue())
+
+
+class WindowEligibilityTests(unittest.TestCase):
+    """Pure geometry behind the restart bar: clipping, gaps, snapping, offsets."""
+
+    def _file(self, start, end, name="f"):
+        return {
+            "start_epoch": start,
+            "end_epoch": end,
+            "dur_s": end - start,
+            "size": 1,
+            "name": name,
+            "start_local": "",
+            "end_local": "",
+        }
+
+    def test_clip_to_window_merges_adjacent_files(self):
+        files = [self._file(0, 100), self._file(100, 200), self._file(400, 500)]
+        self.assertEqual(coverage.clip_to_window(files, 50, 450), [(50, 200), (400, 450)])
+
+    def test_window_eligibility_reports_segments_and_gaps(self):
+        files = [self._file(0, 100), self._file(200, 300)]
+        out = coverage.window_eligibility(files, 50, 250)
+        self.assertEqual(
+            [(s["start_epoch"], s["end_epoch"]) for s in out["segments"]],
+            [(50, 100), (200, 250)],
+        )
+        self.assertEqual([(g["start_epoch"], g["end_epoch"]) for g in out["gaps"]], [(100, 200)])
+        self.assertTrue(out["has_eligible"])
+        self.assertEqual(out["covered_s"], 100)
+
+    def test_epoch_pct_maps_and_clamps_to_the_window(self):
+        self.assertEqual(coverage.epoch_pct(0, 0, 100), 0.0)
+        self.assertEqual(coverage.epoch_pct(50, 0, 100), 50.0)
+        self.assertEqual(coverage.epoch_pct(100, 0, 100), 100.0)
+        self.assertEqual(coverage.epoch_pct(-10, 0, 100), 0.0)
+        self.assertEqual(coverage.epoch_pct(999, 0, 100), 100.0)
+
+    def test_nearest_epoch_snaps_out_of_a_gap(self):
+        segments = [(50, 100), (200, 250)]
+        self.assertEqual(coverage.nearest_epoch(segments, 160, 50, 250), 200)
+        self.assertEqual(coverage.nearest_epoch(segments, 140, 50, 250), 100)
+        self.assertEqual(coverage.nearest_epoch(segments, 80, 50, 250), 80)
+        self.assertEqual(coverage.nearest_epoch(segments, 249, 50, 250), 249)
+        self.assertIsNone(coverage.nearest_epoch([], 150, 50, 250))
+
+    def test_no_eligibility_is_a_real_state_not_an_error(self):
+        out = coverage.window_eligibility([self._file(1000, 1100)], 50, 250)
+        self.assertEqual(out["segments"], [])
+        self.assertFalse(out["has_eligible"])
+        self.assertEqual(out["gaps"], [{"start_epoch": 50, "end_epoch": 250}])
+        self.assertEqual(out["target_epoch"], 50)  # falls back to the window start
+
+    def test_target_epoch_points_at_nearest_recording(self):
+        out = coverage.window_eligibility([self._file(200, 300)], 50, 350)
+        self.assertEqual(out["target_epoch"], 200)
+
+
+class NeighboursApiTests(unittest.TestCase):
+    """route_neighbours exposes the restart bar's window without dropping fields."""
+
+    def _clip(self, start_cam, end_cam):
+        return camera.Clip(
+            uri="rtsp://x",
+            uri_escaped="rtsp://x",
+            start_utc=start_cam,
+            end_utc=end_cam,
+            name="n",
+            size=100,
+            duration_s=0,
+        )
+
+    def test_window_payload_and_existing_fields(self):
+        day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
+        clip = self._clip(
+            util.to_cam_time(day.replace(hour=8, minute=1).astimezone(timezone.utc)),
+            util.to_cam_time(day.replace(hour=8, minute=31).astimezone(timezone.utc)),
+        )
+        cam = mock.Mock()
+        cam.search.return_value = [clip]
+        app = viewer_app.ViewerApp()
+        app.cam = cam
+        handler = _FakeBodyHandler({})
+        from_cam = util.to_cam_time(day.replace(hour=8, minute=10).astimezone(timezone.utc))
+        to_cam = util.to_cam_time(day.replace(hour=8, minute=20).astimezone(timezone.utc))
+
+        app.route_neighbours(handler, {"from": [from_cam], "to": [to_cam]})
+        payload = json.loads(handler.wfile.getvalue())
+
+        self.assertEqual(payload["state"], "ok")
+        for key in ("state_detail", "earlier", "later", "more_earlier", "more_later"):
+            self.assertIn(key, payload)
+
+        window = payload["window"]
+        from_epoch = int(util.parse_cam_time(from_cam).timestamp())
+        to_epoch = int(util.parse_cam_time(to_cam).timestamp())
+        self.assertEqual(window["from_epoch"], from_epoch)
+        self.assertEqual(window["to_epoch"], to_epoch)
+        self.assertEqual(len(window["segments"]), 1)
+        self.assertEqual(window["segments"][0]["start_epoch"], from_epoch)
+        self.assertEqual(window["segments"][0]["end_epoch"], to_epoch)
+        self.assertEqual(window["segments"][0]["start_pct"], 0.0)
+        self.assertEqual(window["segments"][0]["end_pct"], 100.0)
+        self.assertTrue(window["has_eligible"])
+
+    def test_unknown_search_state_omits_window(self):
+        cam = mock.Mock()
+        cam.search.side_effect = camera.ServiceDownError("down")
+        app = viewer_app.ViewerApp()
+        app.cam = cam
+        handler = _FakeBodyHandler({})
+        day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
+        from_cam = util.to_cam_time(day.replace(hour=8, minute=10).astimezone(timezone.utc))
+        to_cam = util.to_cam_time(day.replace(hour=8, minute=20).astimezone(timezone.utc))
+
+        app.route_neighbours(handler, {"from": [from_cam], "to": [to_cam]})
+        payload = json.loads(handler.wfile.getvalue())
+        self.assertEqual(payload["state"], "service_down")
+        self.assertNotIn("window", payload)
 
 
 if __name__ == "__main__":

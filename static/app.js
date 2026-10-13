@@ -189,6 +189,29 @@
     }, 1000);
   }
 
+  /* ── shared neighbours/coverage feed ────────────────────────────
+     One /api/neighbours request per play page. It backs both the neighbour
+     jump table and the restart bar's eligibility layer, so the camera is
+     searched once (that endpoint already performs the day search). Consumers
+     subscribe and are notified when the response arrives. */
+
+  var neighboursState; // undefined until the first response arrives
+  var neighboursSubscribers = [];
+
+  function subscribeNeighbours(fn) {
+    if (typeof neighboursState !== "undefined") { fn(neighboursState); return; }
+    neighboursSubscribers.push(fn);
+  }
+
+  function publishNeighbours(data) {
+    neighboursState = data;
+    var waiting = neighboursSubscribers;
+    neighboursSubscribers = [];
+    for (var i = 0; i < waiting.length; i++) {
+      try { waiting[i](data); } catch (e) { vlog("neighbours subscriber failed", e); }
+    }
+  }
+
   /* Neighbour table under the player, with honest gap labels. */
   function initNeighbours() {
     var box = document.getElementById("jumps");
@@ -205,7 +228,7 @@
     var params = new URLSearchParams(location.search);
     var from = params.get("from");
     var to = params.get("to");
-    if (!from || !to) return;
+    if (!from || !to) { publishNeighbours(null); return; }
 
     function load(attempt) {
       fetch("/api/neighbours?from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to),
@@ -217,16 +240,19 @@
             // The camera's search is known to be flaky: name the reason, retry once,
             // and always leave a way to ask again.
             if (attempt === 0) { window.setTimeout(function () { load(1); }, 1500); return; }
+            publishNeighbours(data); // non-ok state = unknown coverage for the bar
             showJumpProblem("Can\u2019t list other recordings (" +
               (data.state_detail || data.state) + ").");
             return;
           }
+          publishNeighbours(data);
           renderJumpList("earlier", data.earlier, data.more_earlier, "earlier");
           renderJumpList("later", data.later, data.more_later, "later");
         })
         .catch(function (err) {
           box.hidden = false;
           if (attempt === 0) { window.setTimeout(function () { load(1); }, 1500); return; }
+          publishNeighbours({ __error: err });
           showJumpProblem("Couldn\u2019t load nearby recordings (" + (err && err.message ? err.message : err) + ").");
         });
     }
@@ -293,25 +319,8 @@
 
   function attach(video, url, opts) {
     var expected = Number(video.dataset.expected || 0);
-    var t0 = null;
     var endedHandled = false;
     var playedOnce = false; // distinguishes "autoplay blocked" from "user paused"
-
-    function fmt(s) {
-      s = Math.max(0, Math.floor(s));
-      var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
-      return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(r).padStart(2, "0");
-    }
-
-    function drawProgress() {
-      if (opts.kind !== "play") return;
-      var el = document.getElementById("counter");
-      var pr = document.getElementById("progress");
-      var elapsed = video.currentTime || 0;
-      if (el) el.textContent = fmt(elapsed) + " / " + fmt(expected);
-      if (pr && expected) pr.style.width = Math.min(100, (elapsed / expected) * 100) + "%";
-      video.dataset.elapsed = String(Math.floor(elapsed));
-    }
 
     // Media events keep retrying: the first call often precedes usable data.
     video.addEventListener("loadedmetadata", function () { tryPlay(video); });
@@ -324,7 +333,6 @@
       // only clear the prompt when playback is genuinely running.
       if (!video.paused && video.readyState >= 2) hideTapStart();
       setStatus("ok", opts.live ? "Live" : "Playing");
-      if (opts.kind === "play" && !t0) t0 = Date.now();
     });
     video.addEventListener("pause", function () {
       // Prompt only when playback never started (browser policy blocked it).
@@ -339,9 +347,11 @@
       setStatus("connect", opts.live ? "Buffering…" : undefined);
     });
     if (opts.kind === "play") {
-      video.addEventListener("timeupdate", drawProgress);
       video.addEventListener("ended", function () {
-        var elapsed = Number(video.dataset.elapsed || 0);
+        // currentTime is the only end-of-stream signal available; it is not a
+        // clip position, so this is a coarse "did we roughly play the clip"
+        // heuristic, never a displayed time.
+        var elapsed = video.currentTime || 0;
         if (expected && elapsed < expected * 0.9) {
           showEnd(true, "Stream ended early — another playback session may have started (the camera allows one).");
         } else {
@@ -476,6 +486,7 @@
 
   function initPlayback(video) {
     initNeighbours();
+    initRestartBar(video);
     pageKind = "play";
     pageChannel = video.dataset.channel || "101";
     renderStatus = function (kind, text) {
@@ -495,6 +506,259 @@
       if (label) label.textContent = m[1];
     };
     attach(video, video.dataset.url, { live: false, kind: "play" });
+  }
+
+  /* ── restart-from-timestamp bar ─────────────────────────────────
+     A clip-local control under the player. Dragging or tapping only previews;
+     the Restart button commits a fresh /play navigation (so browser Back
+     returns to the previous position). Progress is honest wall-clock, never
+     <video>.currentTime. Eligibility reuses the picker's coverage vocabulary. */
+
+  function initRestartBar(video) {
+    var bar = document.getElementById("restart-bar");
+    if (!bar || !video) return;
+    var scrubber = document.getElementById("restart-scrubber");
+    var nowMark = document.getElementById("restart-now");
+    var readout = document.getElementById("restart-readout");
+    var counter = document.getElementById("counter");
+    var go = document.getElementById("restart-go");
+    var cancel = document.getElementById("restart-cancel");
+    if (!scrubber || !readout || !go) return;
+
+    var fromEpoch = Number(bar.dataset.fromEpoch || 0);
+    var toEpoch = Number(bar.dataset.toEpoch || 0);
+    var size = Number(bar.dataset.size || 0);
+    if (!(toEpoch > fromEpoch)) return;
+
+    function pad(n) { return String(n).padStart(2, "0"); }
+    function clock(epoch) {
+      var d = new Date(epoch * 1000);
+      return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+    }
+
+    var ui = {
+      loaded: false,   // a neighbours response has arrived
+      known: false,    // that response reported usable coverage (state "ok")
+      segments: [],    // [{start_epoch, end_epoch, start_pct, end_pct}]
+      pending: null,   // previewed restart target (epoch seconds)
+      snapNote: "",
+      playing: false,
+      t0: null,        // when playback first started on this page
+      ticker: null,
+    };
+
+    scrubber.min = String(fromEpoch);
+    scrubber.max = String(toEpoch);
+    scrubber.value = String(fromEpoch);
+    scrubber.disabled = true; // until coverage arrives; commit is disabled until then
+
+    function coveredAt(epoch) {
+      for (var i = 0; i < ui.segments.length; i++) {
+        var s = ui.segments[i];
+        if (epoch >= s.start_epoch && epoch <= s.end_epoch) return true;
+      }
+      return false;
+    }
+
+    /* Nearest covered instant to `epoch` (mirrors the picker's snap-to-covered). */
+    function nearestEligible(epoch) {
+      var best = null, bestDist = null;
+      for (var i = 0; i < ui.segments.length; i++) {
+        var s = ui.segments[i].start_epoch, e = ui.segments[i].end_epoch;
+        var point = epoch < s ? s : (epoch > e ? e : epoch);
+        var dist = Math.abs(point - epoch);
+        if (bestDist === null || dist < bestDist) { bestDist = dist; best = point; }
+      }
+      if (best === null) return null;
+      return Math.min(toEpoch, Math.max(fromEpoch, best));
+    }
+
+    function paintTrack() {
+      if (!ui.known) {
+        scrubber.classList.add("unknown");
+        scrubber.style.removeProperty("--track");
+        return;
+      }
+      scrubber.classList.remove("unknown");
+      var stops = [];
+      var cursor = 0;
+      for (var i = 0; i < ui.segments.length; i++) {
+        var startPct = ui.segments[i].start_pct;
+        var endPct = ui.segments[i].end_pct;
+        if (startPct > cursor) stops.push("var(--inset) " + cursor + "% " + startPct + "%");
+        stops.push("var(--cov-4) " + startPct + "% " + endPct + "%");
+        cursor = endPct;
+      }
+      if (cursor < 100) stops.push("var(--inset) " + cursor + "% 100%");
+      if (!stops.length) stops.push("var(--inset) 0% 100%");
+      scrubber.style.setProperty("--track", "linear-gradient(to right, " + stops.join(",") + ")");
+    }
+
+    function updateAria() {
+      var target = ui.pending === null ? fromEpoch : ui.pending;
+      var word = !ui.known
+        ? "coverage couldn\u2019t be checked"
+        : ui.segments.length === 0
+          ? "no recording in this window"
+          : coveredAt(target) ? "recording" : "no recording here";
+      scrubber.setAttribute("aria-valuetext", clock(target) + ", " + word);
+    }
+
+    function renderSelection() {
+      var canCommit;
+      var text;
+      if (!ui.loaded) {
+        canCommit = false;
+        text = "Checking recorded coverage\u2026";
+      } else if (ui.known && ui.segments.length === 0) {
+        canCommit = false;
+        text = "No recording in this window.";
+      } else if (!ui.known) {
+        canCommit = true;
+        text = "Coverage couldn\u2019t be checked. You can still restart, but the " +
+          "camera may have nothing at that time.";
+      } else {
+        var target = ui.pending === null ? fromEpoch : ui.pending;
+        if (coveredAt(target)) {
+          canCommit = true;
+          text = (ui.snapNote ? ui.snapNote + " " : "") +
+            "Restart here at \u2248 " + clock(target) + " \u00b7 recording.";
+        } else {
+          // Defensive: snapping should keep the target covered when one exists.
+          canCommit = false;
+          text = "No recording at " + clock(target) + " \u2014 choose a filled part of the bar.";
+        }
+      }
+      readout.textContent = text;
+      go.disabled = !canCommit;
+      if (cancel) cancel.hidden = !(canCommit && ui.pending !== null && ui.pending !== fromEpoch);
+      updateAria();
+    }
+
+    function setPending(epoch) {
+      var raw = Math.min(toEpoch, Math.max(fromEpoch, Math.round(epoch)));
+      var snapped = ui.known ? nearestEligible(raw) : null;
+      if (snapped !== null && snapped !== raw) {
+        ui.pending = snapped;
+        ui.snapNote = "Snapped to the nearest recording: " + clock(snapped) + ".";
+      } else {
+        ui.pending = raw;
+        ui.snapNote = "";
+      }
+      scrubber.value = String(ui.pending);
+      renderSelection();
+    }
+
+    function cancelPreview() {
+      ui.pending = null;
+      ui.snapNote = "";
+      scrubber.value = String(fromEpoch);
+      renderSelection();
+      try { scrubber.focus({ preventScroll: true }); } catch (e) { /* older browsers */ }
+    }
+
+    function commit() {
+      if (go.disabled) return;
+      var target = ui.pending === null ? fromEpoch : ui.pending;
+      if (ui.known && !coveredAt(target)) return; // never restart into a known gap
+      if (autoNextTimer) { clearInterval(autoNextTimer); autoNextTimer = null; }
+      var endnote = document.getElementById("endnote");
+      if (endnote) { endnote.hidden = true; endnote.innerHTML = ""; }
+      readout.textContent = "Restarting at " + clock(target) +
+        " \u2014 new session, nearest keyframe\u2026";
+      go.disabled = true;
+      // A navigation, not a seek: browser Back returns to the previous position.
+      window.location.href = playHref(target, toEpoch, size);
+    }
+
+    function positionEpoch() {
+      if (!ui.playing || !ui.t0) return null;
+      var pos = fromEpoch + (Date.now() - ui.t0) / 1000;
+      return Math.min(toEpoch, Math.max(fromEpoch, pos));
+    }
+
+    function renderPosition() {
+      var pos = positionEpoch();
+      if (pos === null) {
+        if (nowMark) nowMark.hidden = true;
+        if (counter) counter.textContent = "Position unknown \u2014 playback runs in real time.";
+        return;
+      }
+      var span = toEpoch - fromEpoch;
+      var pct = span > 0 ? ((pos - fromEpoch) / span) * 100 : 0;
+      if (nowMark) { nowMark.hidden = false; nowMark.style.left = pct + "%"; }
+      if (counter) {
+        counter.textContent = "Position \u2248 " + clock(Math.round(pos)) +
+          " \u00b7 playing in real time \u00b7 \u2248 " +
+          humanDuration(Math.max(0, Math.round(toEpoch - pos))) + " left";
+      }
+    }
+
+    function startTicker() {
+      if (ui.ticker) return;
+      ui.ticker = window.setInterval(renderPosition, 1000);
+    }
+    function stopTicker() {
+      if (!ui.ticker) return;
+      clearInterval(ui.ticker);
+      ui.ticker = null;
+    }
+    function markNotPlaying() {
+      ui.playing = false;
+      stopTicker();
+      renderPosition();
+    }
+
+    scrubber.addEventListener("input", function () { setPending(Number(scrubber.value)); });
+    scrubber.addEventListener("keydown", function (e) {
+      if (e.key === "PageUp" || e.key === "PageDown") {
+        e.preventDefault();
+        setPending(Number(scrubber.value) + (e.key === "PageUp" ? 60 : -60));
+      } else if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        commit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        cancelPreview();
+      }
+    });
+    go.addEventListener("click", commit);
+    if (cancel) cancel.addEventListener("click", cancelPreview);
+
+    video.addEventListener("playing", function () {
+      if (!ui.t0) ui.t0 = Date.now();
+      ui.playing = true;
+      startTicker();
+      renderPosition();
+    });
+    video.addEventListener("pause", markNotPlaying);
+    video.addEventListener("waiting", markNotPlaying);
+    video.addEventListener("stalled", markNotPlaying);
+    video.addEventListener("ended", markNotPlaying);
+
+    subscribeNeighbours(function (data) {
+      ui.loaded = true;
+      if (data && data.state === "ok" && data.window) {
+        ui.known = true;
+        ui.segments = data.window.segments || [];
+        var target = typeof data.window.target_epoch === "number"
+          ? data.window.target_epoch : fromEpoch;
+        scrubber.value = String(target);
+        ui.pending = Number(scrubber.value);
+      } else {
+        ui.known = false;
+        ui.segments = [];
+        ui.pending = fromEpoch;
+        scrubber.value = String(fromEpoch);
+      }
+      scrubber.disabled = false;
+      paintTrack();
+      renderSelection();
+      renderPosition();
+    });
+
+    renderSelection();
+    renderPosition();
   }
 
   /* ── time picker (recordings page) ──────────────────────────────

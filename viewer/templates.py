@@ -112,8 +112,29 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <p class="honest">Plays in real time &mdash; a $dur_h clip takes $dur_h. No seeking.</p>
 <p class="fallback"><a href="/snapshot?ch=101">Still image (main)</a><a href="/snapshot?ch=102">Still image (sub)</a></p>
 <p id="status-line" class="status" role="status"><span class="dot spin"></span><span class="label">Connecting to clip&hellip; starts at its beginning.</span></p>
-<p id="counter" class="counter muted">00:00 / $dur_mmss</p>
-<div class="progresswrap" aria-hidden="true"><div id="progress" class="progress"></div></div>
+<p id="counter" class="counter muted">Position unknown &mdash; playback runs in real time.</p>
+<div class="restartbar" id="restart-bar" data-from-epoch="$from_epoch" data-to-epoch="$to_epoch" data-size="$size_raw">
+<div class="restartbar-head">
+<label class="restartbar-label" for="restart-scrubber">Restart from</label>
+<span class="muted" id="restart-ends">$start_local &rarr; $end_local</span>
+</div>
+<div class="restartbar-trackwrap">
+<input type="range" id="restart-scrubber" min="$from_epoch" max="$to_epoch" step="5" value="$from_epoch"
+       aria-label="Restart position within this clip" aria-describedby="restart-readout restart-caveat">
+<span class="rb-now" id="restart-now" hidden aria-hidden="true"></span>
+</div>
+<p class="legend restartbar-legend">
+<span><span class="swatch full"></span>recording</span>
+<span><span class="swatch none"></span>no recording</span>
+<span><span class="swatch unknown"></span>couldn&rsquo;t check</span>
+</p>
+<p class="restartbar-readout" id="restart-readout" aria-live="polite">Checking recorded coverage&hellip;</p>
+<p class="muted" id="restart-caveat">Restarts at the nearest keyframe before the chosen time (up to a few seconds earlier), with a short gap. You can go Back to your previous position.</p>
+<div class="restartbar-actions">
+<button type="button" id="restart-go" class="searchbtn" disabled>Restart here</button>
+<button type="button" id="restart-cancel" class="copybtn" hidden>Cancel</button>
+</div>
+</div>
 <div id="endnote" class="endnote" hidden></div>
 <section id="jumps" hidden>
 <h2>Nearby recordings</h2>
