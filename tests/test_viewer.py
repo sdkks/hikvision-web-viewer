@@ -577,6 +577,54 @@ class CameraPutMappingTests(unittest.TestCase):
             self._cam_with(500, "boom")._put("/ISAPI/x", "<body/>")
 
 
+class CameraCredentialsMappingTests(unittest.TestCase):
+    """A 401 is "credentials refused", never collapsed into "did not answer"."""
+
+    def _cam(self):
+        return camera.Camera("http://cam", "u", "p", "rtsp://cam", 5)
+
+    def test_401_is_credentials_and_stays_a_camera_error(self):
+        # Subclassing CameraError/ServiceDownError is what keeps every existing
+        # failure path typed (and stops a new type escaping a handler as a 500).
+        self.assertTrue(issubclass(camera.CredentialsRejectedError, camera.CameraError))
+        self.assertTrue(issubclass(camera.CredentialsRejectedError, camera.ServiceDownError))
+
+    def test_get_401_is_credentials(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        cam.session.get.return_value = mock.Mock(status_code=401, text="")
+        with self.assertRaises(camera.CredentialsRejectedError):
+            cam._get("/ISAPI/System/deviceInfo")
+
+    def test_get_500_is_still_service_down(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        cam.session.get.return_value = mock.Mock(status_code=500, text="")
+        with self.assertRaises(camera.ServiceDownError):
+            cam._get("/ISAPI/System/deviceInfo")
+
+    def test_put_401_is_credentials(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        cam.session.put.return_value = mock.Mock(status_code=401, text="")
+        with self.assertRaises(camera.CredentialsRejectedError):
+            cam._put("/ISAPI/x", "<body/>")
+
+    def test_search_401_is_credentials(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        cam.session.post.return_value = mock.Mock(status_code=401, text="")
+        with self.assertRaises(camera.CredentialsRejectedError):
+            cam.search("2026-10-12T00:00:00Z", "2026-10-13T00:00:00Z")
+
+    def test_snapshot_401_is_credentials(self):
+        cam = self._cam()
+        cam.session = mock.Mock()
+        cam.session.get.return_value = mock.Mock(status_code=401, content=b"")
+        with self.assertRaises(camera.CredentialsRejectedError):
+            cam.snapshot_jpeg("101")
+
+
 class _FakeCam:
     """Camera stand-in for motion_write: no network, records the PUT body."""
 
@@ -619,6 +667,48 @@ class _FakeBodyHandler:
 
     def end_headers(self):
         pass
+
+
+class CredentialsSurfaceTests(unittest.TestCase):
+    """The credentials message reaches every page that surfaces camera failures."""
+
+    def _app_with(self, **side_effects):
+        cam = mock.Mock()
+        for name, effect in side_effects.items():
+            getattr(cam, name).side_effect = effect
+        app = viewer_app.ViewerApp()
+        app.cam = cam
+        return app, cam
+
+    def test_coverage_401_is_a_credentials_state(self):
+        app, _ = self._app_with(search=camera.CredentialsRejectedError("401"))
+        handler = _FakeBodyHandler({})
+        app.route_coverage(handler, {"date": ["2026-10-13"]})
+        payload = json.loads(handler.wfile.getvalue())
+        self.assertEqual(payload["state"], "credentials")
+        self.assertIn("credentials", payload["state_detail"])
+
+    def test_range_search_401_card_names_credentials(self):
+        app, _ = self._app_with(search=camera.CredentialsRejectedError("401"))
+        card, code = app.run_search("2026-10-13T00:00", "2026-10-13T01:00")
+        self.assertEqual(code, 502)
+        self.assertIn("refused the viewer", card)
+
+    def test_motion_read_401_is_a_credentials_state(self):
+        app, _ = self._app_with(motion_detection=camera.CredentialsRejectedError("401"))
+        handler = _FakeBodyHandler({})
+        app.route_motion_get(handler)
+        payload = json.loads(handler.wfile.getvalue())
+        self.assertEqual(payload["state"], "credentials")
+
+    def test_live_page_shows_the_credentials_warning(self):
+        app, cam = self._app_with(stream_resolution=camera.CredentialsRejectedError("401"))
+        cam.storage.return_value = {"free_mb": 1, "capacity_mb": 2}
+        cam.device_info.return_value = {}
+        handler = _FakeBodyHandler({})
+        app.page_live(handler)
+        html = handler.wfile.getvalue().decode()
+        self.assertIn("refused the viewer", html)
 
 
 class MotionWriteTests(unittest.TestCase):
@@ -713,6 +803,14 @@ class MotionWriteTests(unittest.TestCase):
         app.cam = _FakeCam(self.BASE, put_error=camera.RejectedError("403 Invalid Operation"))
         result = app.motion_write(intended)
         self.assertEqual(result["state"], "rejected")
+        self.assertFalse(result["write_attempted"])
+
+    def test_credentials_refused_write_saves_nothing(self):
+        app = self._app()
+        intended = self._intent(app)
+        app.cam = _FakeCam(self.BASE, put_error=camera.CredentialsRejectedError("401"))
+        result = app.motion_write(intended)
+        self.assertEqual(result["state"], "credentials")
         self.assertFalse(result["write_attempted"])
 
     def test_refuses_to_write_when_base_is_not_a_motion_document(self):
@@ -1051,6 +1149,13 @@ class PlayPageTests(unittest.TestCase):
         html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
         self.assertIn("previous start time", html)
         self.assertNotIn("previous position", html)
+
+    def test_results_link_returns_to_the_clip_day_and_hour(self):
+        html = self._render({"from": ["20261012T190000Z"], "to": ["20261012T192000Z"]})
+        local = util.parse_cam_time("20261012T190000Z").astimezone()
+        # The href is HTML-escaped (& -> &amp;) in the attribute.
+        expected = f'href="/recordings?date={local.strftime("%Y-%m-%d")}&amp;hour={local.hour}"'
+        self.assertIn(expected, html)
 
 
 if __name__ == "__main__":

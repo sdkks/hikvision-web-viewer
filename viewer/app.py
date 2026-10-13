@@ -24,6 +24,14 @@ MAX_DRAIN_BYTES = 4_000_000
 # never sends it must still get the typed reply, and must not pin the thread.
 DRAIN_DEADLINE_S = 0.35
 
+# A camera 401 is a config problem, not a broken camera. Say so wherever a
+# camera failure is shown, and never collapse it into "did not answer".
+CREDENTIALS_REFUSED = (
+    "The camera refused the viewer's credentials. Fix the camera credentials "
+    "(HIK_USER / HIK_PASSWORD today; a config file is coming)."
+)
+CREDENTIALS_REFUSED_SHORT = "the camera refused the viewer's credentials"
+
 
 def auth_required() -> bool:
     """Viewer-side protection is active only when both credentials are configured."""
@@ -129,6 +137,8 @@ class ViewerApp:
                 f"SD {util.human_size(sd['free_mb'] * 1024 * 1024)} free of "
                 f"{util.human_size(sd['capacity_mb'] * 1024 * 1024)}"
             )
+        except camera.CredentialsRejectedError:
+            line = "SD storage: the camera refused the viewer's credentials"
         except camera.ServiceDownError:
             line = "SD storage: service not responding"
         except camera.UnreachableError:
@@ -170,15 +180,27 @@ class ViewerApp:
     def channel_label(self, channel: str, fallback: str) -> str:
         try:
             res = self.cam.stream_resolution(channel)
+        except camera.CredentialsRejectedError:
+            # Surface it (page_live shows the credentials banner) instead of
+            # quietly falling back to a plausible-looking label.
+            raise
         except camera.CameraError:
             res = None
         return f"{fallback} · {res[0]}×{res[1]}" if res else fallback
 
     def page_live(self, handler):
         channel = config.DEFAULT_CHANNEL if config.DEFAULT_CHANNEL in CHANNELS else "101"
-        content = templates.LIVE.replace("$channel", channel)
-        content = content.replace("$main_label", self.channel_label("101", "Main (full quality)"))
-        content = content.replace("$sub_label", self.channel_label("102", "Sub (lighter)"))
+        main_label, sub_label = "Main (full quality)", "Sub (lighter)"
+        warning = ""
+        try:
+            main_label = self.channel_label("101", main_label)
+            sub_label = self.channel_label("102", sub_label)
+        except camera.CredentialsRejectedError:
+            warning = templates.CREDENTIALS_WARNING
+        content = templates.LIVE.replace("$camera_warning", warning)
+        content = content.replace("$channel", channel)
+        content = content.replace("$main_label", main_label)
+        content = content.replace("$sub_label", sub_label)
         content = content.replace("$p_main", "true").replace("$p_sub", "false")
         # Codec hint: the mock encodes H.264; the real camera's main channel is H.265.
         content = content.replace("$codec_set", "avc" if config.MOCK else "hevc")
@@ -189,6 +211,8 @@ class ViewerApp:
         try:
             doc = self.cam.motion_detection()
             cells = motion.decode_gridmap(doc["gridMap"])
+        except camera.CredentialsRejectedError:
+            return f"<p class='warnnote'>{esc(CREDENTIALS_REFUSED)}</p>"
         except camera.CameraError:
             return "<p class='muted'>The camera's motion configuration could not be read.</p>"
         except ValueError:
@@ -269,6 +293,12 @@ class ViewerApp:
             card = (
                 f"<div class='errcard'><p>Camera unreachable at {esc(config.CAM_HOST)}.</p>"
                 f"<p class='muted'>{esc(exc)}</p></div>"
+            )
+            return card, 502
+        except camera.CredentialsRejectedError:
+            card = (
+                f"<div class='errcard'><p>{esc(CREDENTIALS_REFUSED)}</p>"
+                f"<p class='muted'>Range is kept — fix the credentials and search again.</p></div>"
             )
             return card, 502
         except camera.ServiceDownError:
@@ -376,7 +406,12 @@ class ViewerApp:
                 window_from_epoch = from_epoch
         # The window can never begin after the session it contains.
         window_from_epoch = min(window_from_epoch, from_epoch)
+        local_start = start_dt.astimezone()
+        results_href = (
+            f"/recordings?date={local_start.strftime('%Y-%m-%d')}&hour={local_start.hour}"
+        )
         content = templates.PLAY.substitute(
+            results_href=esc(results_href),
             start_local=esc(util.local_display(start_dt)),
             end_local=esc(util.local_display(end_dt)),
             dur_h=util.human_duration(dur_s),
@@ -553,6 +588,8 @@ class ViewerApp:
             clips = self.cam.search(
                 util.iso_search_time(day_start), util.iso_search_time(day_end), max_results=200
             )
+        except camera.CredentialsRejectedError:
+            payload.update(state="credentials", state_detail=CREDENTIALS_REFUSED_SHORT)
         except camera.ServiceDownError:
             payload.update(
                 state="service_down", state_detail="the camera did not answer the search request"
@@ -612,6 +649,8 @@ class ViewerApp:
                 util.iso_search_time(day_start + timedelta(days=1)),
                 max_results=200,
             )
+        except camera.CredentialsRejectedError:
+            payload.update(state="credentials", state_detail=CREDENTIALS_REFUSED_SHORT)
         except camera.ServiceDownError:
             payload.update(
                 state="service_down", state_detail="the camera did not answer the search request"
@@ -700,6 +739,8 @@ class ViewerApp:
         payload = {"state": "ok", "state_detail": ""}
         try:
             doc = self.cam.motion_detection()
+        except camera.CredentialsRejectedError:
+            payload.update(state="credentials", state_detail=CREDENTIALS_REFUSED_SHORT)
         except camera.UnreachableError:
             payload.update(state="unreachable", state_detail=f"no route to {config.CAM_HOST}")
         except camera.ServiceDownError:
@@ -788,6 +829,12 @@ class ViewerApp:
         )
         try:
             base_xml = self.cam.motion_detection_xml()
+        except camera.CredentialsRejectedError:
+            return {
+                "state": "credentials",
+                "state_detail": CREDENTIALS_REFUSED_SHORT,
+                "write_attempted": False,
+            }
         except camera.UnreachableError:
             return {
                 "state": "unreachable",
@@ -832,6 +879,13 @@ class ViewerApp:
 
         try:
             self.cam.put_motion_detection(merged)
+        except camera.CredentialsRejectedError:
+            # 401 means the request was refused before it executed: nothing landed.
+            return {
+                "state": "credentials",
+                "state_detail": CREDENTIALS_REFUSED_SHORT,
+                "write_attempted": False,
+            }
         except camera.RejectedError as exc:
             return {"state": "rejected", "state_detail": str(exc), "write_attempted": False}
         except camera.UnreachableError:

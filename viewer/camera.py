@@ -45,6 +45,17 @@ class RejectedError(CameraError):
     camera said no' never reads as 'the camera is down'."""
 
 
+class CredentialsRejectedError(ServiceDownError):
+    """The camera answered but refused the viewer's credentials (HTTP 401).
+
+    Subclasses ServiceDownError on purpose: every existing failure path then
+    stays typed, so introducing this state cannot make an unhandled exception
+    escape a handler (or turn a request into a 500). Surfaces that must stay
+    honest catch this *before* ServiceDownError and say the credentials were
+    refused rather than that the camera did not answer.
+    """
+
+
 @dataclass(frozen=True)
 class Clip:
     """One recorded clip as reported by the search service."""
@@ -98,6 +109,10 @@ class Camera:
             raise _classify_requests_error(exc) from exc
         if r.status_code == 200:
             return r.text
+        if r.status_code == 401:
+            raise CredentialsRejectedError(
+                f"{path} -> HTTP 401 (the camera refused the viewer's credentials)"
+            )
         raise ServiceDownError(f"{path} -> HTTP {r.status_code}")
 
     def _put(self, path: str, body: str, content_type: str = "application/xml") -> str:
@@ -113,6 +128,10 @@ class Camera:
             raise _classify_requests_error(exc) from exc
         if r.status_code == 200:
             return r.text
+        if r.status_code == 401:
+            raise CredentialsRejectedError(
+                f"{path} -> HTTP 401 (the camera refused the viewer's credentials)"
+            )
         if r.status_code == 403:
             detail = _xml_text(r.text, "statusString") or (r.text or "").strip()[:200]
             raise RejectedError(f"{path} -> HTTP 403 Invalid Operation: {detail}")
@@ -175,6 +194,10 @@ class Camera:
             )
         except Exception as exc:
             raise _classify_requests_error(exc) from exc
+        if r.status_code == 401:
+            raise CredentialsRejectedError(
+                "search -> HTTP 401 (the camera refused the viewer's credentials)"
+            )
         if r.status_code != 200:
             raise ServiceDownError(f"search -> HTTP {r.status_code}")
         return parse_search_response(r.text, self.rtsp_base)
@@ -187,6 +210,10 @@ class Camera:
             )
         except Exception as exc:
             raise _classify_requests_error(exc) from exc
+        if r.status_code == 401:
+            raise CredentialsRejectedError(
+                f"snapshot ch{channel} -> HTTP 401 (the camera refused the viewer's credentials)"
+            )
         if r.status_code != 200 or not r.content.startswith(b"\xff\xd8"):
             raise ServiceDownError(f"snapshot ch{channel} -> HTTP {r.status_code}")
         return r.content

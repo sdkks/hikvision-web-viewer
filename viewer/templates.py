@@ -2,6 +2,14 @@
 
 from string import Template
 
+# A camera 401 (wrong credentials) is a config problem, not a broken camera;
+# render it as a warning card instead of "did not answer".
+CREDENTIALS_WARNING = (
+    '<div class="errcard" role="alert"><p>The camera refused the viewer&#39;s '
+    "credentials. Nothing will load until the camera credentials are fixed "
+    "(HIK_USER / HIK_PASSWORD today; a config file is coming).</p></div>"
+)
+
 BASE = Template("""<!doctype html>
 <html lang="en">
 <head>
@@ -27,7 +35,7 @@ $content
 </html>
 """)
 
-LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
+LIVE = """$camera_warning<h1 style="position:absolute;left:-9999px">Live view</h1>
 <div class="videowrap">
 <video id="live-video" data-channel="$channel" data-codecs="$codec_set" autoplay muted playsinline controls
        poster="/snapshot?ch=$channel"></video>
@@ -69,6 +77,7 @@ RECORDINGS = """<h1>Recordings</h1>
 <label class="picker-day" for="pick-date">Jump to a day
 <input type="date" id="pick-date" name="date">
 </label>
+<button type="button" id="picker-refresh" class="copybtn">Refresh recordings</button>
 </div>
 <div class="chips" id="recent-days" aria-label="Recent days"></div>
 <p id="picker-status" class="status" role="status"><span class="dot"></span><span class="label"></span></p>
@@ -102,7 +111,7 @@ RECORDINGS = """<h1>Recordings</h1>
 $results
 """
 
-PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
+PLAY = Template("""<a class="back" href="$results_href">&larr; Results</a>
 <h1>Clip &middot; $start_local &rarr; $end_local <span class="muted">($dur_h$size_part)</span></h1>
 <div class="videowrap">
 <video id="clip-video" autoplay muted playsinline controls data-codecs="hevc"

@@ -133,6 +133,19 @@
     current.attempts = 0;
   }
 
+  /* The Results link returns to the picker at the clip's own day and hour, so
+     leaving a clip keeps your place. Derived from the restart bar's session
+     start epoch — the same anchor the play page renders server-side. */
+  function resultsHref() {
+    var bar = document.getElementById("restart-bar");
+    var epoch = bar ? Number(bar.dataset.fromEpoch || 0) : 0;
+    if (!epoch) return "/recordings";
+    var d = new Date(epoch * 1000);
+    var pad = function (n) { return String(n).padStart(2, "0"); };
+    return "/recordings?date=" + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" +
+      pad(d.getDate()) + "&hour=" + d.getHours();
+  }
+
   function showEnd(warn, text) {
     var note = document.getElementById("endnote");
     if (!note) return;
@@ -140,7 +153,7 @@
     note.innerHTML = "<p>" + text + "</p><div class='row'>" +
       "<button type='button' class='retry' onclick='window.location.reload()'>Replay</button>" +
       "<a class='retry' style='display:inline-flex;align-items:center;text-decoration:none' " +
-      "href='/recordings'>← Results</a></div>";
+      "href='" + resultsHref() + "'>\u2190 Results</a></div>";
     note.hidden = false;
     maybeAutoNext(note);
   }
@@ -921,35 +934,80 @@
       loadDay(iso, opts);
     }
 
+    let loadSeq = 0;
+
     async function loadDay(iso, opts) {
+      opts = opts || {};
+      const refresh = !!opts.refresh;
+      const seq = ++loadSeq;
       dayView.hidden = false;
-      if (cache.has(iso)) {
-        renderDay(cache.get(iso));
+      if (!refresh && !opts.force && cache.has(iso)) {
+        state.coverage = cache.get(iso);
+        renderDay(state.coverage);
       } else {
-        setStatus("spin", `Checking ${dayLabel(iso)}…`);
-        grid.textContent = "";
+        setStatus("spin", refresh ? `Refreshing ${dayLabel(iso)}…` : `Checking ${dayLabel(iso)}…`);
+        // A refresh keeps the last answer on screen while the new one is in
+        // flight; a first check has nothing to keep yet.
+        if (!refresh) grid.textContent = "";
+        let payload;
         try {
           const res = await fetch(`/api/coverage?date=${iso}`, { cache: "no-store" });
-          const payload = await res.json();
-          if (["ok", "empty"].includes(payload.state)) cache.set(iso, payload);
-          state.coverage = payload;
-          renderDay(payload);
+          payload = await res.json();
         } catch (err) {
+          if (seq !== loadSeq) return;
+          if (refresh && state.coverage) {
+            setStatus("err", `Couldn't refresh ${dayLabel(iso)}: ${err}. Showing the previous check.`);
+            return;
+          }
           state.coverage = null;
           grid.textContent = "";
           setStatus("err", `Couldn't reach the viewer: ${err}`);
           return;
         }
+        if (seq !== loadSeq) return;
+        if (refresh && coverageUnknown(payload) && state.coverage) {
+          // Leave the previous day on screen and say the refresh failed: an
+          // unchecked day must not look freshly checked, and must not blank.
+          setStatus("warn", stateMessage(payload.state) +
+            " Showing the previous check." + stateDetail(payload));
+          return;
+        }
+        if (["ok", "empty"].includes(payload.state)) cache.set(iso, payload);
+        state.coverage = payload;
+        renderDay(payload);
       }
-      if (opts && opts.push) syncUrl(true);
+      if (seq !== loadSeq) return;
+      if (opts.push) syncUrl(true);
       else syncUrl(false);
-      if (opts && opts.focusHour !== undefined) {
+      if (opts.focusHour !== undefined) {
         selectHour(opts.focusHour, { push: !!opts.push, minute: opts.minute });
+      } else if (refresh && state.hour !== null) {
+        // Re-apply the open hour against the refreshed day so its minute strip
+        // and file list do not keep describing the pre-refresh answer.
+        selectHour(state.hour,
+          { push: false, minute: state.minute === null ? undefined : state.minute });
       }
     }
 
     function coverageUnknown(payload) {
-      return payload && ["service_down", "unreachable", "bad_response"].includes(payload.state);
+      return payload &&
+        ["service_down", "unreachable", "bad_response", "credentials"].includes(payload.state);
+    }
+
+    /* One honest message per coverage state, shared by the day view and Refresh. */
+    function stateMessage(state) {
+      return {
+        service_down: "The camera's search service isn't responding (known to be flaky). Live view and clip playback still work.",
+        unreachable: "Camera unreachable.",
+        bad_response: "Unexpected search reply. Live view still works.",
+        credentials: "The camera refused the viewer's credentials. Fix the camera credentials (HIK_USER / HIK_PASSWORD today; a config file is coming).",
+      }[state] || "Couldn't check this day.";
+    }
+
+    function stateDetail(payload) {
+      return payload && payload.state_detail
+        ? ` (${String(payload.state_detail).slice(0, 120)})`
+        : "";
     }
 
     function renderDay(payload) {
@@ -964,15 +1022,7 @@
 
       const retryBtn = document.getElementById("picker-retry");
       if (unknown) {
-        const messages = {
-          service_down: "The camera's search service isn't responding (known to be flaky). Live view and clip playback still work.",
-          unreachable: "Camera unreachable.",
-          bad_response: "Unexpected search reply. Live view still works.",
-        };
-        const detail = payload.state_detail
-          ? ` (${String(payload.state_detail).slice(0, 120)})`
-          : "";
-        setStatus("warn", (messages[payload.state] || "Couldn't check this day.") + detail);
+        setStatus("warn", stateMessage(payload.state) + stateDetail(payload));
         if (retryBtn) {
           retryBtn.hidden = false;
           retryBtn.textContent = "Retry this day";
@@ -1189,6 +1239,22 @@
       });
     }
 
+    // Refresh is the same "re-run this day, bypass the cache" action the error
+    // Retry already performs, exposed as a normal, always-available control.
+    const refreshControl = document.getElementById("picker-refresh");
+    let refreshing = false;
+    function refreshDay() {
+      if (!state.date || refreshing) return;
+      refreshing = true;
+      if (refreshControl) refreshControl.disabled = true;
+      cache.delete(state.date); // the point of Refresh: never read the cache
+      loadDay(state.date, { refresh: true, force: true }).finally(() => {
+        refreshing = false;
+        if (refreshControl) refreshControl.disabled = false;
+      });
+    }
+    if (refreshControl) refreshControl.addEventListener("click", refreshDay);
+
     dateInput.addEventListener("change", () => {
       if (dateInput.value) selectDate(dateInput.value, { push: true });
     });
@@ -1206,7 +1272,12 @@
     function applyUrl(opts) {
       const params = new URLSearchParams(location.search);
       const date = params.get("date");
-      if (!date) return;
+      if (!date) {
+        // No deep link: open on today rather than an empty grid. replaceState
+        // adds no history entry, so Back still leaves the page.
+        selectDate(isoDate(new Date()), { push: false });
+        return;
+      }
       const hourRaw = params.get("hour");
       const minRaw = params.get("min");
       const hour = hourRaw === null ? null : Number(hourRaw);
@@ -1847,7 +1918,9 @@
         unreachable: "The camera is unreachable. Nothing was saved.",
         service_down: "The camera did not answer. Nothing was saved.",
         bad_response: "The camera's reply wasn't what the viewer expected.",
-        bad_request: "The viewer rejected the request."
+        bad_request: "The viewer rejected the request.",
+        credentials: "The camera refused the viewer's credentials. Nothing was saved. " +
+          "Fix the camera credentials (HIK_USER / HIK_PASSWORD today; a config file is coming)."
       };
       showError((messages[body.state] || "Could not save.") +
         (body.state_detail ? " (" + escapeHtml(body.state_detail) + ")" : ""),
@@ -1875,7 +1948,9 @@
             var known = {
               unreachable: "The camera is unreachable.",
               service_down: "The camera did not answer.",
-              bad_response: "The camera returned an unexpected zone format."
+              bad_response: "The camera returned an unexpected zone format.",
+              credentials: "The camera refused the viewer's credentials. Fix the camera " +
+                "credentials (HIK_USER / HIK_PASSWORD today; a config file is coming)."
             };
             var msg = known[data && data.state] || "Could not read the camera's zones.";
             var detail = data && data.state_detail
