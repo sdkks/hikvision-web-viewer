@@ -73,6 +73,10 @@ def _live_cmd(channel: str, directory: Path, transcode: bool) -> list[str]:
             "ffmpeg",
             "-loglevel",
             "error",
+            # Pace like a real camera: without -re the synthetic source encodes many
+            # times faster than realtime, so the HLS timeline races and hls.js chases
+            # a runaway live edge (while burning CPU on content nobody can watch).
+            "-re",
             "-f",
             "lavfi",
             "-i",

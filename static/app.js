@@ -9,6 +9,36 @@
 
   var current = { hls: null, video: null, timer: null, attempts: 0, bufferedOnce: false, t0: null };
   var renderStatus = function () {};
+  var gestureFallbackArmed = false;
+
+  /* Start playback without a click. Browsers gate autoplay on muted media, and
+     Firefox additionally refuses until the element is demonstrably muted, so we
+     set the properties (not just attributes) and retry when data arrives. If the
+     policy still refuses, the first tap/click/keypress anywhere starts it. */
+  function tryPlay(video) {
+    if (!video) return;
+    video.muted = true;
+    video.defaultMuted = true;
+    video.autoplay = true;
+    video.setAttribute("playsinline", "");
+    var attempt = video.play();
+    if (attempt && typeof attempt.catch === "function") {
+      attempt.catch(function () {
+        if (!gestureFallbackArmed) {
+          gestureFallbackArmed = true;
+          var resume = function () {
+            document.removeEventListener("pointerdown", resume);
+            document.removeEventListener("keydown", resume);
+            document.removeEventListener("touchstart", resume);
+            tryPlay(current.video || video);
+          };
+          document.addEventListener("pointerdown", resume, { passive: true });
+          document.addEventListener("keydown", resume);
+          document.addEventListener("touchstart", resume, { passive: true });
+        }
+      });
+    }
+  }
   var pageKind = null;          // "live" | "play"
   var pageChannel = "101";
 
@@ -92,6 +122,11 @@
       video.dataset.elapsed = String(Math.floor(elapsed));
     }
 
+    // Media events keep retrying: the first call often precedes usable data.
+    video.addEventListener("loadedmetadata", function () { tryPlay(video); });
+    video.addEventListener("canplay", function () { tryPlay(video); });
+    tryPlay(video);
+
     video.addEventListener("playing", function () {
       setStatus("ok", opts.live ? "Live" : "Playing");
       if (opts.kind === "play" && !t0) t0 = Date.now();
@@ -114,7 +149,7 @@
     function goNative() {
       setStatus("connect", "Connecting…");
       video.src = url;
-      video.play().catch(function () { /* controls remain */ });
+      tryPlay(video);
       video.addEventListener("error", function () {
         setStatus("err", "Stream error. Still images below always work.");
       });
@@ -132,13 +167,14 @@
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, function () {
         setStatus("connect", opts.live ? "Connecting…" : "Connecting to clip… starts at its beginning.");
-        video.play().catch(function () { /* Low Power Mode etc; controls remain */ });
+        tryPlay(video);
       });
       hls.on(Hls.Events.FRAG_BUFFERED, function () {
         if (!current.bufferedOnce) {
           current.bufferedOnce = true;
           setStatus("ok", opts.live ? "Live" : "Playing");
         }
+        tryPlay(video); // data is buffered now — the most likely moment to succeed
       });
       if (opts.live) {
         // Honest live latency: camera GOPs vary, so measure instead of promising.
