@@ -42,11 +42,23 @@ No camera at hand? `HIK_MOCK=1 venv/bin/python -m viewer.app` runs against built
 
 Credentials are read from the environment only — never committed. `config.env` is gitignored.
 
-## Browser support
+## Codec handling (H.264, H.265/HEVC, H.265+)
 
-Live/playback video uses MediaSource Extensions (ManagedMediaSource on iOS 17.1+). The camera's
-main stream is H.265: Safari (macOS/iOS) decodes it; Chrome needs the sub channel or falls back to
-snapshot stills (the UI says so). Still-image links work everywhere, JavaScript or not.
+The server auto-detects each channel's encoding via ISAPI at session start:
+
+- **H.264 source** -> remuxed into HLS verbatim (`-c copy`) — near-zero CPU.
+- **H.265/HEVC source** (including H.265+/Smart codec streams) -> transcoded to
+  H.264 on the fly, so every browser plays it (Firefox and Chrome cannot MSE-decode
+  HEVC reliably). Costs CPU only while someone is actually watching.
+
+Playback uses hls.js on every browser (native HLS on Safari as fallback), so both
+codecs work regardless of vendor. Camera-side you can freely choose H.264, H.265
+or H.265+ — the viewer adapts automatically.
+
+The codec is read at session start, so after changing the camera's encoding the
+new mode applies the next time a stream starts (close/hide the tab, or wait for
+the idle reaper). Still-image links work everywhere,
+JavaScript or not.
 
 ## Notes on honesty (by design)
 

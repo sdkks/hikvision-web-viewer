@@ -60,9 +60,18 @@ class ViewerApp:
         handler.wfile.write(data)
 
     # ── pages ────────────────────────────────────────────────────────
+    def channel_label(self, channel: str, fallback: str) -> str:
+        try:
+            res = self.cam.stream_resolution(channel)
+        except camera.CameraError:
+            res = None
+        return f"{fallback} · {res[0]}×{res[1]}" if res else fallback
+
     def page_live(self, handler):
         channel = config.DEFAULT_CHANNEL if config.DEFAULT_CHANNEL in CHANNELS else "101"
         content = templates.LIVE.replace("$channel", channel)
+        content = content.replace("$main_label", self.channel_label("101", "Main (full quality)"))
+        content = content.replace("$sub_label", self.channel_label("102", "Sub (lighter)"))
         content = content.replace("$p_main", "true").replace("$p_sub", "false")
         # Codec hint: the mock encodes H.264; the real camera's main channel is H.265.
         content = content.replace("$codec_set", "avc" if config.MOCK else "hevc")

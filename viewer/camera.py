@@ -188,6 +188,11 @@ class Camera:
         codec = _xml_text(xml, "videoCodecType").upper()
         return codec if codec in ("H.264", "H.265", "H.265+") else ""
 
+    def stream_resolution(self, channel: str) -> tuple[int, int] | None:
+        xml = self._get(f"/ISAPI/Streaming/channels/{channel}")
+        w, h = _int_text(xml, "videoResolutionWidth"), _int_text(xml, "videoResolutionHeight")
+        return (w, h) if w and h else None
+
     def rtsp_live_url(self, channel: str) -> str:
         return f"{self.rtsp_base}/Streaming/channels/{channel}"
 
@@ -229,6 +234,12 @@ class MockCamera(Camera):
 
     def storage(self) -> dict:
         return {"status": "ok", "capacity_mb": 244016, "free_mb": 231500, "writable": True}
+
+    def stream_codec(self, channel: str) -> str:
+        return "H.264"  # mock fixtures encode H.264 (exercises the copy path)
+
+    def stream_resolution(self, channel: str) -> tuple[int, int] | None:
+        return (1280, 720) if channel.endswith("1") else (640, 360)
 
     def search(self, iso_from: str, iso_to: str, max_results: int = 100) -> list[Clip]:
         uri = self.MOCK_CLIP.format(host=config.CAM_HOST)

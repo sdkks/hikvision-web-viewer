@@ -34,19 +34,19 @@ def _ffmpeg_base() -> list[str]:
     return ["ffmpeg", "-loglevel", "error", "-rtsp_transport", "tcp"]
 
 
-def _hls_out(directory: Path, live: bool) -> list[str]:
+def _hls_out(directory: Path, live: bool, transcode: bool) -> list[str]:
+    """HLS output flags.
+
+    transcode=True: HEVC -> H.264 (web-safe, costs CPU).
+    transcode=False: source is already H.264 -> '-c:v copy' (near-zero CPU).
+    """
     flags = "delete_segments+independent_segments" if live else "independent_segments"
-    return [
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "25",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        "25",
+    codec_flags = (
+        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p", "-g", "25"]
+        if transcode
+        else ["-c", "copy"]
+    )
+    return codec_flags + [
         "-an",
         "-f",
         "hls",
@@ -100,32 +100,14 @@ def _live_cmd(channel: str, directory: Path, transcode: bool) -> list[str]:
             str(directory / "seg_%05d.ts"),
             str(directory / "index.m3u8"),
         ]
-    return _ffmpeg_base() + [
-        "-i",
-        _camera_rtsp(channel),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "25",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        "25",
-        "-an",
-        "-f",
-        "hls",
-        "-hls_time",
-        "1",
-        "-hls_list_size",
-        "6",
-        "-hls_flags",
-        "delete_segments+independent_segments",
-        "-hls_segment_filename",
-        str(directory / "seg_%05d.ts"),
-        str(directory / "index.m3u8"),
-    ]
+    return (
+        _ffmpeg_base()
+        + [
+            "-i",
+            _camera_rtsp(channel),
+        ]
+        + _hls_out(directory, live=True, transcode=transcode)
+    )
 
 
 def _play_cmd(from_cam: str, to_cam: str, directory: Path, transcode: bool) -> list[str]:
@@ -168,32 +150,14 @@ def _play_cmd(from_cam: str, to_cam: str, directory: Path, transcode: bool) -> l
 
     creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
     q = quote(f"starttime={from_cam}&endtime={to_cam}", safe="=&")
-    return _ffmpeg_base() + [
-        "-i",
-        f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101?{q}",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "25",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        "50",
-        "-an",
-        "-f",
-        "hls",
-        "-hls_time",
-        "2",
-        "-hls_list_size",
-        "0",
-        "-hls_flags",
-        "independent_segments",
-        "-hls_segment_filename",
-        str(directory / "seg_%05d.ts"),
-        str(directory / "index.m3u8"),
-    ]
+    return (
+        _ffmpeg_base()
+        + [
+            "-i",
+            f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101?{q}",
+        ]
+        + _hls_out(directory, live=False, transcode=transcode)
+    )
 
 
 def live_key(channel: str) -> str:

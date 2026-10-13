@@ -32,8 +32,8 @@ LIVE = """<h1 style="position:absolute;left:-9999px">Live view</h1>
        poster="/snapshot?ch=$channel"></video>
 </div>
 <div class="channelbar" role="group" aria-label="Channel">
-<button type="button" class="chan" data-channel="101" aria-pressed="$p_main">Main 1080p</button>
-<button type="button" class="chan" data-channel="102" aria-pressed="$p_sub">Sub 360p &middot; lighter</button>
+<button type="button" class="chan" data-channel="101" aria-pressed="$p_main">$main_label</button>
+<button type="button" class="chan" data-channel="102" aria-pressed="$p_sub">$sub_label</button>
 </div>
 <p id="status-line" class="status" role="status"><span class="dot spin"></span><span class="label">Connecting&hellip;</span></p>
 <div class="fallback">
