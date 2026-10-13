@@ -9,7 +9,9 @@ An idle reaper kills sessions nobody has polled recently and deletes their files
 """
 
 import hashlib
+import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -19,8 +21,8 @@ from pathlib import Path
 from . import config
 
 HLS_ROOT = Path(tempfile.gettempdir()) / f"hikvision-viewer-hls-{config.BIND_PORT}"
-LIVE_IDLE_S = 120
-PLAY_IDLE_S = 900
+LIVE_IDLE_S = 90
+PLAY_IDLE_S = 600
 
 _sessions: dict[str, dict] = {}
 _sessions_lock = threading.Lock()
@@ -210,11 +212,25 @@ def _kill_orphans(directory: Path) -> None:
 
 
 def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> dict:
+    """Spawn ffmpeg under a watchdog shell.
+
+    The watchdog exits when the server process dies and SIGKILLs ffmpeg, so a
+    crashed/killed server can never leave encoder orphans behind (macOS has no
+    PDEATHSIG). Runs in its own session so the group can be killed atomically.
+    """
     err_log = open(directory / "ffmpeg-stderr.log", "ab")
+    watchdog = (
+        'parent=$PPID; "$@" & child=$!; '
+        'while kill -0 "$parent" 2>/dev/null; do sleep 2; done; '
+        'kill -9 "$child" 2>/dev/null; wait "$child" 2>/dev/null'
+    )
+    wrapped = ["/bin/sh", "-c", watchdog, "ffmpeg-watchdog"] + cmd
     return {
         "kind": kind,
         "key": key,
-        "proc": subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_log),
+        "proc": subprocess.Popen(
+            wrapped, stdout=subprocess.DEVNULL, stderr=err_log, start_new_session=True
+        ),
         "dir": directory,
         "err_log": err_log,
         "last_access": time.monotonic(),
@@ -298,11 +314,17 @@ def _kill(session: dict) -> None:
         pass
     proc = session["proc"]
     if proc.poll() is None:
-        proc.terminate()
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # watchdog + ffmpeg
+        except (ProcessLookupError, PermissionError):
+            pass
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            proc.kill()  # stuck in a camera TCP read: TERM is ignored
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
@@ -311,7 +333,7 @@ def _kill(session: dict) -> None:
 
 def _reap_loop() -> None:
     while True:
-        time.sleep(30)
+        time.sleep(15)
         now = time.monotonic()
         with _sessions_lock:
             for key, session in list(_sessions.items()):
