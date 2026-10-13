@@ -271,23 +271,6 @@ class ViewerApp:
         self.render(handler, "Playback", content, nav="recordings")
 
     # ── streams & data ───────────────────────────────────────────────
-    def stream_response(self, handler, proc):
-        """Pipe ffmpeg stdout to the client as a close-delimited fMP4 stream."""
-        handler.send_response(200)
-        handler.send_header("Content-Type", "video/mp4")
-        handler.send_header("Cache-Control", "no-store")
-        handler.send_header("Connection", "close")
-        handler.end_headers()
-
-        def write_chunk(chunk: bytes) -> None:
-            handler.wfile.write(chunk)
-            handler.wfile.flush()
-
-        try:
-            streams.pump(proc, write_chunk)
-        except (BrokenPipeError, ConnectionResetError, TimeoutError):
-            pass  # client went away or startup timeout; pump() already killed ffmpeg
-
     def route_static(self, handler, name: str):
         if not name:
             handler.send_error(404)

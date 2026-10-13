@@ -309,14 +309,14 @@ def _kill(session: dict) -> None:
     if proc.poll() is None:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # watchdog + ffmpeg
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError, PermissionError:
             pass
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError, PermissionError:
                 pass
             try:
                 proc.wait(timeout=3)

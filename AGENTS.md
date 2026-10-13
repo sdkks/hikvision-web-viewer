@@ -46,7 +46,8 @@ Browser: static/app.js (hls.js) ────────────────
 | `scripts/ci-smoke.sh` | Integration smoke test used by CI (mock session, HLS, stop, no-ffmpeg) |
 | `.github/workflows/ci.yml` | Gates on ubuntu-26.04 amd64 + arm64 |
 | `.github/workflows/container.yml` | Multi-arch container publish to GHCR on tags |
-| `Makefile` | install / gates / run-mock / docker-build / docker-publish |
+| `Makefile` | setup / gates / run-mock / docker-build / docker-publish |
+| `.envrc` | direnv: activates `.venv` and sources `config.env` if present |
 
 ---
 
@@ -128,26 +129,25 @@ All configuration is environment-based (`viewer/config.py`):
 ## Development workflow
 
 ```bash
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-venv/bin/pre-commit install            # gitleaks, ruff, format, unittest, commit-msg
+make setup
+.venv/bin/pre-commit install            # gitleaks, ruff, format, unittest, commit-msg
 cp config.env.example config.env       # then edit credentials
 ```
 
 Run (mock mode needs no camera):
 
 ```bash
-HIK_MOCK=1 VIEWER_PORT=8757 venv/bin/python -m viewer.app     # fixtures
+HIK_MOCK=1 VIEWER_PORT=8757 .venv/bin/python -m viewer.app     # fixtures
 source config.env && export HIK_HOST HIK_USER HIK_PASSWORD
-venv/bin/python -m viewer.app                                 # real camera
+.venv/bin/python -m viewer.app                                 # real camera
 ```
 
 Gates (all must pass before committing):
 
 ```bash
-venv/bin/ruff check . && venv/bin/ruff format --check .
-venv/bin/python -B -m unittest discover -s tests
-venv/bin/pre-commit run -a
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+.venv/bin/python -B -m unittest discover -s tests
+.venv/bin/pre-commit run -a
 ```
 
 Commit messages are Conventional Commits (`feat:`, `fix:`, `docs:`, …) — the

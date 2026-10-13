@@ -1,17 +1,33 @@
-.PHONY: install test lint format gates run run-mock docker-build docker-publish
+.PHONY: setup install test lint format gates run run-mock docker-build docker-publish
 
-PY ?= venv/bin/python
+PYTHON_VERSION ?= 3.14
+VENV ?= .venv
+PY ?= $(VENV)/bin/python
 DOCKER_IMAGE ?= sdkks/hikvision-web-viewer
 DOCKER_PLATFORMS ?= linux/amd64,linux/arm64
 VERSION ?= edge
-HOST_PORT ?= 8756
 
-install:
-	python3 -m venv venv
-	$(PY) -m pip install --upgrade pip
-	$(PY) -m pip install -r requirements.txt
-	$(PY) -m pip install ruff pre-commit
-	venv/bin/pre-commit install
+# One-shot developer setup: ensures uv + direnv exist, creates the uv-managed
+# Python 3.14 venv, installs runtime + dev dependencies, and git hooks.
+setup:
+	@command -v uv >/dev/null 2>&1 || { \
+		if command -v brew >/dev/null 2>&1; then brew install uv; \
+		else echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; fi; }
+	@command -v direnv >/dev/null 2>&1 || { \
+		if command -v brew >/dev/null 2>&1; then brew install direnv; \
+		else echo "direnv is required: https://direnv.net/docs/installation.html"; exit 1; fi; }
+	uv venv $(VENV) --python $(PYTHON_VERSION) --seed
+	uv pip install --python $(PY) -r requirements.txt ruff pre-commit
+	$(VENV)/bin/pre-commit install
+	@echo ""
+	@echo "Setup complete."
+	@echo "  - Run 'direnv allow' once to auto-load .venv and config.env"
+	@echo "  - Run 'make gates' before committing"
+
+install: setup
+
+test:
+	$(PY) -B -m unittest discover -s tests -v
 
 lint:
 	$(PY) -m ruff check .
@@ -19,15 +35,12 @@ lint:
 format:
 	$(PY) -m ruff format .
 
-test:
-	$(PY) -B -m unittest discover -s tests -v
-
-# Full local gate set (what CI runs plus the pre-commit suite).
+# Full local gate set (what CI checks, plus the pre-commit suite).
 gates:
 	$(PY) -m ruff check .
 	$(PY) -m ruff format --check .
 	$(PY) -B -m unittest discover -s tests
-	venv/bin/pre-commit run -a
+	$(VENV)/bin/pre-commit run -a
 
 run:
 	$(PY) -m viewer.app
@@ -40,7 +53,7 @@ docker-build:
 	podman build -f Containerfile -t $(DOCKER_IMAGE):local .
 
 # Multi-arch publish to GHCR (podman manifest, same convention as sdkks/7b-mta).
-# Requires: podman login ghcr.io  (GHCR token with write:packages)
+# Requires: podman login ghcr.io  (token with write:packages)
 docker-publish:
 	$(eval COMMIT_SHA := $(shell git rev-parse --short=12 HEAD))
 	podman build --no-cache --platform $(DOCKER_PLATFORMS) --manifest ghcr.io/$(DOCKER_IMAGE):$(VERSION) -f Containerfile .

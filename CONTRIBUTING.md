@@ -10,7 +10,9 @@ auto-detection), and a testing playbook.
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.14+
+- [`uv`](https://docs.astral.sh/uv/) and [`direnv`](https://direnv.net/) —
+  `make setup` installs both via Homebrew if they are missing
 - `ffmpeg` on `PATH` (streams are remuxed/transcoded by ffmpeg)
 - A reachable Hikvision camera for real testing (optional: mock mode works
   without one)
@@ -20,35 +22,34 @@ auto-detection), and a testing playbook.
 
 ```bash
 git clone <this repo> && cd hikvision-web-viewer
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
+make setup                         # uv + direnv, .venv (3.14), deps, git hooks
 
-# Install the git hooks — REQUIRED before your first commit
-venv/bin/pre-commit install
-
-# Local configuration (gitignored; never commit credentials)
-cp config.env.example config.env
+direnv allow                       # trust .envrc: activates .venv, loads config.env
+cp config.env.example config.env   # local credentials (gitignored)
 $EDITOR config.env
 ```
+
+`make setup` is idempotent and installs the pre-commit hooks for you. `make gates`
+runs the full local gate set.
 
 ## Running
 
 ```bash
 # No camera needed — deterministic fixtures
-HIK_MOCK=1 VIEWER_PORT=8757 venv/bin/python -m viewer.app
+HIK_MOCK=1 VIEWER_PORT=8757 .venv/bin/python -m viewer.app
 
 # Real camera
 set -a; source config.env; set +a
-venv/bin/python -m viewer.app            # http://127.0.0.1:8756
+.venv/bin/python -m viewer.app            # http://127.0.0.1:8756
 ```
 
 ## Gates — run these before every PR
 
 ```bash
-venv/bin/ruff check .                       # lint + import order
-venv/bin/ruff format --check .              # formatting
-venv/bin/python -B -m unittest discover -s tests
-venv/bin/pre-commit run -a                  # runs all of the above + gitleaks
+.venv/bin/ruff check .                       # lint + import order
+.venv/bin/ruff format --check .              # formatting
+.venv/bin/python -B -m unittest discover -s tests
+.venv/bin/pre-commit run -a                  # runs all of the above + gitleaks
 ```
 
 The pre-commit hooks also enforce **Conventional Commits**
@@ -98,7 +99,7 @@ exercises the stop route, and asserts no ffmpeg survives.
 Run the same smoke test locally:
 
 ```bash
-HIK_MOCK=1 VIEWER_PORT=8799 venv/bin/python -m viewer.app &
+HIK_MOCK=1 VIEWER_PORT=8799 .venv/bin/python -m viewer.app &
 VIEWER_PORT=8799 bash scripts/ci-smoke.sh
 ```
 

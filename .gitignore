@@ -1,4 +1,8 @@
 venv/
+venv*-backup/
+venv-*/
+.venv/
+.direnv/
 __pycache__/
 *.py[cod]
 config.env

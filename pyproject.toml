@@ -1,6 +1,7 @@
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+# Runtime requires Python 3.14+ (see README); ruff targets the same.
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B"]

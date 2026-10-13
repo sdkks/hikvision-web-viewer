@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         raw = Path(args[0]).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+    except OSError, UnicodeError:
         print("Cannot read commit message file as UTF-8.", file=sys.stderr)
         return 1
     if not valid_message(raw):

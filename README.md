@@ -12,23 +12,27 @@ Shows live view and recorded clips in the browser, honest about what the camera 
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.14+
 - ffmpeg on PATH (streams are `-c copy`; no transcoding)
 - A reachable Hikvision camera with ISAPI/RTSP enabled (tested on DS-2CV2121G2-IDW)
 
 ## Quick start
 
 ```bash
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-cp config.env.example config.env   # then edit credentials
-source config.env && export HIK_HOST HIK_USER HIK_PASSWORD
-venv/bin/python -m viewer.app
+make setup                          # uv + direnv, .venv on Python 3.14, hooks
+cp config.env.example config.env    # then edit credentials
+direnv allow                        # loads .venv and config.env automatically
+.venv/bin/python -m viewer.app
 ```
+
+`make setup` installs `uv` and `direnv` via Homebrew if they are missing, creates
+the uv-managed `.venv` (Python 3.14), installs dependencies and the git hooks.
+`direnv` (via the committed `.envrc`) activates `.venv` and sources `config.env`
+on `cd`, so no manual exports are needed.
 
 Open http://127.0.0.1:8756
 
-No camera at hand? `HIK_MOCK=1 venv/bin/python -m viewer.app` runs against built-in fixtures.
+No camera at hand? `HIK_MOCK=1 .venv/bin/python -m viewer.app` runs against built-in fixtures.
 
 ## Configuration (environment variables)
 
@@ -110,10 +114,14 @@ closed, and idle sessions are reaped automatically. On a weak NAS CPU, set
 ## Development
 
 ```bash
-venv/bin/pre-commit install          # gitleaks, ruff, unittest, conventional commits
-venv/bin/python -B -m unittest discover -s tests -v
-venv/bin/ruff check . && venv/bin/ruff format --check .
+.venv/bin/pre-commit install          # gitleaks, ruff, unittest, conventional commits
+.venv/bin/python -B -m unittest discover -s tests -v
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
 ```
 
 Layout: `viewer/camera.py` (ISAPI client + error model), `viewer/streams.py` (ffmpeg sessions),
 `viewer/app.py` (HTTP server + pages), `static/` (CSS + streaming client), `tests/`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
