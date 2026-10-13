@@ -4,10 +4,12 @@ A small, self-hosted web app to view a Hikvision camera **without the vendor clo
 Shows live view and recorded clips in the browser, honest about what the camera can and cannot do.
 
 - **Live view** — main (1080p) and sub (360p) channels, streamed as fragmented MP4 via ffmpeg.
-- **Recordings** — presets or exact range list the files on the card (play/download each), plus a
-  **browse-by-time picker**: pick a day,
-  see which hours have recordings, drill into an hour to see the recorded minutes, and play or
-  download from any point. Copyable rtsp/ffmpeg escape hatches included.
+- **Recordings** — presets or exact range list the files on the card, plus a **browse-by-time picker**
+  that opens on today: see which hours have recordings, drill into an hour to see the recorded
+  minutes, and play or download from any point. An always-available **Refresh recordings** action
+  bypasses the cached day (so a clip recorded a minute ago appears without reloading the page; a
+  failed refresh keeps the previous view instead of blanking it), and leaving a clip returns you to
+  the same day and hour. Copyable rtsp/ffmpeg escape hatches included.
 - **Motion zones** — read the camera's motion detection configuration and paint which cells count as
   motion: an 18 x 22 grid drawn over a live still, an Arm/Mask brush with drag painting, a 12-zone
   quick map for small screens, a sensitivity control, and an on/off switch. Applying writes the
@@ -26,7 +28,8 @@ Shows live view and recorded clips in the browser, honest about what the camera 
   cancellable.
 - **Honest states** — the camera's search service is known to be flaky; the UI distinguishes
   "search down" from "no clips" from "camera unreachable", and always offers snapshot stills as a
-  floor. No vendor cloud, no accounts.
+  floor. A refused credential is named as exactly that rather than reported as a camera that did not
+  answer. No vendor cloud, no accounts.
 
 ## Requirements
 

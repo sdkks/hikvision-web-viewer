@@ -100,6 +100,10 @@ working. Use the error model:
 - `UnreachableError` -> "Camera unreachable at <host>"
 - `ServiceDownError` -> "search service isn't responding … live view still works"
 - `BadResponseError` -> unexpected reply (the camera returned something we did not expect)
+- `CredentialsRejectedError` -> "the camera refused the viewer's credentials" (an HTTP 401). It is
+  deliberately a subtype of `ServiceDownError`, so every existing failure path stays typed and no
+  handler can start returning a 500; the surfaces that matter catch it first and name the refusal
+  rather than reporting a camera that "did not answer"
 
 Never collapse "service down" into "no recordings" — distinguishing them *is*
 the feature. Streaming/snapshots are the reliable floor; offer them everywhere.
@@ -122,9 +126,10 @@ and it lands on the nearest keyframe before the requested time.
 ### 4. The coverage picker stays honest
 
 `/api/coverage?date=YYYY-MM-DD` runs **one search per day** and returns
-`state` (`ok|empty|truncated|service_down|unreachable|bad_response`) plus hour
-and minute levels and merged ranges. The picker maps each state to distinct
-copy: "no recordings" is neutral; "service down" is a warning with Retry.
+`state` (`ok|empty|truncated|service_down|unreachable|bad_response|credentials`)
+plus hour and minute levels and merged ranges. The picker maps each state to
+distinct copy: "no recordings" is neutral; "service down" is a warning with
+Retry; refused credentials name themselves.
 Never let an unchecked day render as an empty day. The client caches per date
 and deep-links as `?date=&hour=&min=` (browser Back steps up a level).
 
