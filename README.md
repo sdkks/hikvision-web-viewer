@@ -129,6 +129,10 @@ JavaScript or not.
   time, and it is hidden while playback is paused or stalled rather than showing a confident number;
   it can run a few seconds ahead of the picture, because the browser buffers behind the stream.
 - The camera allows **one** playback session; starting a new one takes over the old.
+- **A download is the camera's own file, not a trimmed export.** `ContentMgmt/download` streams the
+  stored recording that contains the point you asked for, in the camera's own container, at roughly
+  4x realtime; the camera does not cut it to the exact range, so a download can cover more time than
+  the range you picked. The filename names the point you asked for, not a clip cut to it.
 - Recording search is served by the camera's app layer, which on some firmware is unreliable —
   the UI names that state instead of pretending it is "no clips".
 
