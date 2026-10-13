@@ -23,6 +23,51 @@ DOWNLOAD_CHUNK = 64 * 1024
 # so anything else is dropped rather than embedded in the ISAPI XML body.
 _DOWNLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
+# Download containers we can name from the response's first bytes. The camera's
+# own Content-Type is not trustworthy (this firmware sends "application/binary"),
+# so the type and extension come from the bytes; when they match nothing we know,
+# we say "opaque binary" rather than guess a video format.
+_MPEG_PS_MAGIC = b"\x00\x00\x01\xba"  # MPEG program stream pack start code
+_TS_PACKET_SIZE = 188
+_TS_SYNC_BYTE = 0x47
+_IMKH_MAGIC = b"IMKH"  # Hikvision's own wrapper around a recorded stream
+_IMKH_SCAN = 4096
+
+
+def sniff_download_container(first: bytes) -> tuple[str, str]:
+    """Name the download's container from its first bytes -> (Content-Type, extension).
+
+    MPEG program stream   -> video/mpeg / .mpg
+    ISO base media (MP4)  -> video/mp4  / .mp4
+    MPEG transport stream -> video/mp2t / .ts
+    Anything else         -> application/octet-stream / .bin
+
+    An unrecognised stream must not be given a video format we did not observe:
+    the honest answer is "opaque binary", so the neutral type and a `.bin` suffix
+    are used instead of inventing an extension. (A camera-declared video/* is not
+    used here: the bytes are the only evidence, and this firmware's declared type
+    is not even a video type.)
+
+    This camera wraps the recording in a short `IMKH` header before the MPEG
+    program stream: measured on a DS-2CV2121G2-IDW the pack start sits at offset
+    40, and ffprobe reads the whole file as mpeg. Naming that `.mpg` describes the
+    payload, where `.bin` would hide a perfectly playable video.
+    """
+    if first.startswith(_MPEG_PS_MAGIC):
+        return "video/mpeg", "mpg"
+    if first.startswith(_IMKH_MAGIC) and _MPEG_PS_MAGIC in first[:_IMKH_SCAN]:
+        return "video/mpeg", "mpg"
+    if first[4:8] == b"ftyp":
+        return "video/mp4", "mp4"
+    if (
+        len(first) > _TS_PACKET_SIZE
+        and first[0] == _TS_SYNC_BYTE
+        and first[_TS_PACKET_SIZE] == _TS_SYNC_BYTE
+    ):
+        return "video/mp2t", "ts"
+    return "application/octet-stream", "bin"
+
+
 # A motion body is at most a 18x22 boolean array; 1 MB is already generous.
 MAX_BODY_BYTES = 1_000_000
 # How much of a rejected body we will read before answering (see _reject_body).
@@ -1032,16 +1077,24 @@ class ViewerApp:
             )
             return
 
-        content_type = (getattr(response, "headers", None) or {}).get("Content-Type") or "video/mp4"
-        filename = f"clip_{from_cam}_{to_cam}.mp4"
+        # Sniff the container's first bytes before any header goes out: the bytes
+        # decide both the Content-Type and the extension. The first chunk is held
+        # back and written after the headers, then the rest of the stream is
+        # relayed unchanged -- the file is never buffered whole.
         try:
+            stream = response.iter_content(DOWNLOAD_CHUNK)
+            first = next((chunk for chunk in stream if chunk), b"")
+            content_type, extension = sniff_download_container(first)
+            filename = f"clip_{from_cam}_{to_cam}.{extension}"
             handler.send_response(200)
             handler.send_header("Content-Type", content_type)
             handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             handler.send_header("Cache-Control", "no-store")
             handler.send_header("Connection", "close")
             handler.end_headers()
-            for chunk in response.iter_content(DOWNLOAD_CHUNK):
+            if first:
+                handler.wfile.write(first)
+            for chunk in stream:
                 if chunk:
                     handler.wfile.write(chunk)
         except BrokenPipeError, ConnectionResetError, TimeoutError:

@@ -1182,6 +1182,55 @@ class PlayPageTests(unittest.TestCase):
         self.assertIn(expected, html)
 
 
+class DownloadSniffTests(unittest.TestCase):
+    """The download's type and extension come from the bytes, not a guess."""
+
+    def test_mpeg_program_stream(self):
+        data = b"\x00\x00\x01\xba" + b"\x00" * 20
+        self.assertEqual(viewer_app.sniff_download_container(data), ("video/mpeg", "mpg"))
+
+    def test_iso_base_media_ftyp_box(self):
+        data = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16
+        self.assertEqual(viewer_app.sniff_download_container(data), ("video/mp4", "mp4"))
+
+    def test_mpeg_transport_stream(self):
+        ts = bytearray(200)
+        ts[0] = 0x47
+        ts[188] = 0x47
+        self.assertEqual(viewer_app.sniff_download_container(bytes(ts)), ("video/mp2t", "ts"))
+
+    def test_hikvision_imkh_header_wrapped_mpeg_program_stream(self):
+        # Measured on the device: a 40-byte "IMKH" header, then the MPEG-PS pack
+        # start, and ffprobe reads the whole file as mpeg. Without this the stream
+        # falls back to .bin, hiding a playable video.
+        data = b"IMKH" + b"\x00" * 36 + b"\x00\x00\x01\xba" + b"\x00" * 20
+        self.assertEqual(viewer_app.sniff_download_container(data), ("video/mpeg", "mpg"))
+
+    def test_imkh_magic_alone_is_not_evidence_of_mpeg(self):
+        data = b"IMKH" + b"\x00" * 400
+        self.assertEqual(
+            viewer_app.sniff_download_container(data), ("application/octet-stream", "bin")
+        )
+
+    def test_lone_sync_byte_is_not_enough_to_claim_transport_stream(self):
+        # A TS packet is 188 bytes; a single 0x47 is coincidence, not evidence.
+        data = b"\x47" + b"\x00" * 20
+        self.assertEqual(
+            viewer_app.sniff_download_container(data), ("application/octet-stream", "bin")
+        )
+
+    def test_unknown_bytes_stay_opaque(self):
+        data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+        self.assertEqual(
+            viewer_app.sniff_download_container(data), ("application/octet-stream", "bin")
+        )
+
+    def test_empty_body_stays_opaque(self):
+        self.assertEqual(
+            viewer_app.sniff_download_container(b""), ("application/octet-stream", "bin")
+        )
+
+
 class DownloadRouteTests(unittest.TestCase):
     """route_download relays the camera stream and stays typed on failure."""
 
@@ -1217,7 +1266,7 @@ class DownloadRouteTests(unittest.TestCase):
 
     def test_relays_the_camera_stream_with_download_headers(self):
         app = self._app()
-        fake = self._FakeDownload([b"ab", b"", b"cdef"])
+        fake = self._FakeDownload([b"\x00\x00\x00\x18ftypmp42", b"", b"cdef"])
         captured = {}
 
         def fake_download(uri_escaped):
@@ -1236,7 +1285,7 @@ class DownloadRouteTests(unittest.TestCase):
             },
         )
         self.assertEqual(handler.status, 200)
-        self.assertEqual(handler.wfile.getvalue(), b"abcdef")
+        self.assertEqual(handler.wfile.getvalue(), b"\x00\x00\x00\x18ftypmp42cdef")
         self.assertTrue(fake.closed)
         self.assertEqual(fake.chunk_size, viewer_app.DOWNLOAD_CHUNK)
         # The rebuilt playback URI keeps the camera's &amp; escaping and carries
@@ -1249,6 +1298,37 @@ class DownloadRouteTests(unittest.TestCase):
             'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
         )
         self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
+
+    def test_single_chunk_body_is_relayed_intact(self):
+        # The first chunk is read early to sniff the container, so it must still
+        # be written exactly once: not dropped and not duplicated.
+        app = self._app()
+        body = b"\x00\x00\x00\x18ftypmp42" + bytes(range(256))
+        fake = self._FakeDownload([body])
+        app.cam.download_stream = lambda uri: fake
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.wfile.getvalue(), body)
+        self.assertEqual(
+            handler.response_headers["Content-Disposition"],
+            'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
+        )
+
+    def test_mpeg_program_stream_download_is_named_mpg(self):
+        # The extension and type follow the sniffed container, not a hard-coded
+        # .mp4 -- the real device serves MPEG-PS here.
+        app = self._app()
+        body = b"\x00\x00\x01\xba" + bytes(range(256))
+        app.cam.download_stream = lambda uri: self._FakeDownload([body])
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.wfile.getvalue(), body)
+        self.assertEqual(handler.response_headers["Content-Type"], "video/mpeg")
+        self.assertEqual(
+            handler.response_headers["Content-Disposition"],
+            'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mpg"',
+        )
 
     def test_unsafe_name_is_dropped_not_embedded(self):
         app = self._app()

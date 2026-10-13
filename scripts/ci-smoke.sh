@@ -63,10 +63,14 @@ curl -sf -m 10 "${BASE}/api/coverage?date=$(date +%F)" | grep -q '"state"'
 curl -sf -m 5 "${BASE}/recordings" | grep -q "hour-grid"
 curl -sf -m 5 "${BASE}/recordings" | grep -q "scrubber"
 
-echo "== download route relays a body (catches a missing route)"
+echo "== download route relays a body named from its bytes"
 curl -sf -m 60 -D /tmp/ci-smoke-download-headers.txt -o /tmp/ci-smoke-download.mp4 \
     "${BASE}/download?from=20261012T194808Z&to=20261012T201036Z&name=ch01_x&size=1000"
 test -s /tmp/ci-smoke-download.mp4
+# The mock's ffmpeg muxer emits fragmented ISO base media, i.e. bytes 4-8 are
+# the ftyp box. .mp4 / video/mp4 is therefore the honest name -- and the bytes
+# must actually say so, not merely the filename.
+test "$(dd if=/tmp/ci-smoke-download.mp4 bs=1 skip=4 count=4 2>/dev/null)" = "ftyp"
 grep -qi '^content-disposition: attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"' \
     /tmp/ci-smoke-download-headers.txt
 grep -qi '^content-type: video/mp4' /tmp/ci-smoke-download-headers.txt
