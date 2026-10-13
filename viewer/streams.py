@@ -164,10 +164,11 @@ def _play_cmd(from_cam: str, to_cam: str, directory: Path) -> list[str]:
         ]
     from urllib.parse import quote
 
+    creds = f"{config.CAM_USER}:{config.CAM_PASS}@"
     q = quote(f"starttime={from_cam}&endtime={to_cam}", safe="=&")
     return _ffmpeg_base() + [
         "-i",
-        f"rtsp://{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101?{q}",
+        f"rtsp://{creds}{config.CAM_HOST}:{config.RTSP_PORT}/Streaming/tracks/101?{q}",
         "-c:v",
         "libx264",
         "-preset",
@@ -205,15 +206,17 @@ def play_key(from_cam: str, to_cam: str) -> str:
 def _kill_orphans(directory: Path) -> None:
     """Kill leftover ffmpeg processes from a previous server run that still
     write into this session directory (they outlive their parent otherwise)."""
-    subprocess.run(["pkill", "-f", str(directory)], check=False, capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", str(directory)], check=False, capture_output=True)
 
 
 def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> dict:
+    err_log = open(directory / "ffmpeg-stderr.log", "ab")
     return {
         "kind": kind,
         "key": key,
-        "proc": subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+        "proc": subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_log),
         "dir": directory,
+        "err_log": err_log,
         "last_access": time.monotonic(),
         "started": time.time(),
     }
@@ -289,13 +292,21 @@ def kill_all() -> None:
 
 
 def _kill(session: dict) -> None:
+    try:
+        session.get("err_log") and session["err_log"].close()
+    except Exception:
+        pass
     proc = session["proc"]
     if proc.poll() is None:
-        proc.kill()
+        proc.terminate()
         try:
-            proc.wait(timeout=3)
+            proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            pass
+            proc.kill()  # stuck in a camera TCP read: TERM is ignored
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def _reap_loop() -> None:

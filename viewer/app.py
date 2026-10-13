@@ -274,7 +274,13 @@ class ViewerApp:
         handler.wfile.write(data)
 
     def route_hls_playlist(self, handler, kind: str, query: dict):
-        """Ensure the session exists and serve its playlist with absolute segment URLs."""
+        """Ensure the session exists and serve its playlist with absolute segment URLs.
+
+        Seeking is session-restart semantics: requesting the playlist with an adjusted
+        `from` (inside the clip window) restarts the camera playback at that point.
+        The camera also honors RTSP Range: npt/clock and Scale: 1-4 (see ISAPI spec
+        ch. RTSP playback), which we approximate this way without raw RTSP control.
+        """
         if kind == "live":
             channel = query.get("ch", ["101"])[0] or "101"
             if channel not in CHANNELS:
@@ -293,15 +299,34 @@ class ViewerApp:
             return
         key = session["key"]
 
+        # The camera allows ONE playback session; a stale one server-side keeps the
+        # slot busy for a while after an abrupt client death. Wait for the first
+        # playlist; if ffmpeg dies fast (camera busy), retry the session a few times.
         playlist_path = session["dir"] / "index.m3u8"
-        if not playlist_path.is_file():
-            import time as _time
+        import time as _time
 
-            deadline = _time.monotonic() + 5.0
-            while not playlist_path.is_file() and _time.monotonic() < deadline:
-                _time.sleep(0.25)
+        attempts = 0
+        deadline = _time.monotonic() + 12.0
+        while not playlist_path.is_file() and _time.monotonic() < deadline:
+            _time.sleep(0.25)
+            if playlist_path.is_file():
+                break
+            if session["proc"].poll() is not None:
+                attempts += 1
+                if attempts > 3:
+                    break
+                # camera busy or transient failure: respawn (single-slot enforced)
+                if session["kind"] == "play":
+                    session = streams.ensure_play(from_cam, to_cam)
+                else:
+                    channel = query.get("ch", ["101"])[0] or "101"
+                    session = streams.ensure_live(channel)
         if not playlist_path.is_file():
-            handler.send_error(503, "stream starting - retry in a moment")
+            handler.send_error(
+                503,
+                "stream not starting - the camera allows one playback session and may "
+                "still be holding it; wait ~30 s and retry",
+            )
             return
         text = playlist_path.read_text()
         base = f"/hls/media/{key}/"
