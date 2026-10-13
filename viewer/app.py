@@ -420,7 +420,18 @@ def make_handler(app: ViewerApp):
 
 
 def run() -> None:
+    import atexit
+    import signal
+
     app = ViewerApp()
+
+    def _shutdown(*_args) -> None:
+        streams.kill_all()
+
+    atexit.register(_shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     server = ThreadingHTTPServer((config.BIND_HOST, config.BIND_PORT), make_handler(app))
     server.daemon_threads = True
     mode = "MOCK" if config.MOCK else f"camera {config.CAM_HOST}"

@@ -202,6 +202,12 @@ def play_key(from_cam: str, to_cam: str) -> str:
     return f"play-{digest}"
 
 
+def _kill_orphans(directory: Path) -> None:
+    """Kill leftover ffmpeg processes from a previous server run that still
+    write into this session directory (they outlive their parent otherwise)."""
+    subprocess.run(["pkill", "-f", str(directory)], check=False, capture_output=True)
+
+
 def _spawn(kind: str, key: str, cmd: list[str], directory: Path) -> dict:
     return {
         "kind": kind,
@@ -224,6 +230,7 @@ def ensure_live(channel: str) -> dict:
         if session:
             shutil.rmtree(session["dir"], ignore_errors=True)
         directory = HLS_ROOT / key
+        _kill_orphans(directory)
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True, exist_ok=True)
         session = _spawn("live", key, _live_cmd(channel, directory), directory)
@@ -248,6 +255,7 @@ def ensure_play(from_cam: str, to_cam: str) -> dict:
         if session:
             shutil.rmtree(session["dir"], ignore_errors=True)
         directory = HLS_ROOT / key
+        _kill_orphans(directory)
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True, exist_ok=True)
         session = _spawn("play", key, _play_cmd(from_cam, to_cam, directory), directory)
@@ -270,6 +278,14 @@ def session_dir(key: str) -> Path | None:
     with _sessions_lock:
         session = _sessions.get(key)
         return session["dir"] if session else None
+
+
+def kill_all() -> None:
+    """Kill every tracked session (server shutdown)."""
+    with _sessions_lock:
+        for session in _sessions.values():
+            _kill(session)
+        _sessions.clear()
 
 
 def _kill(session: dict) -> None:
