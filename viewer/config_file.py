@@ -77,13 +77,30 @@ def _names(keys: set[str]) -> str:
 
 
 def load(path: str) -> CameraFields:
-    """Read, parse and validate the file at *path*; raises ConfigFileError."""
+    """Read, parse and validate the file at *path*; raises ConfigFileError.
+
+    ``utf-8-sig`` strips a leading byte-order mark, so a file saved by a
+    BOM-writing editor still parses as JSON instead of failing on the BOM.
+    A file that is not valid UTF-8 at all is a clean ConfigFileError, the same
+    as any other malformed file — never an escaped UnicodeDecodeError.
+    """
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        text = Path(path).read_text(encoding="utf-8-sig")
     except OSError as exc:
         raise ConfigFileError(f"cannot read the config file {path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigFileError(f"the config file {path} is not valid UTF-8: {exc}") from exc
+
+    def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        obj: dict[str, object] = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ConfigFileError(f"the config file {path} repeats the key {key!r}")
+            obj[key] = value
+        return obj
+
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_no_duplicate_keys)
     except json.JSONDecodeError as exc:
         raise ConfigFileError(f"the config file {path} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
@@ -129,6 +146,20 @@ def _validate_camera_fields(camera: Mapping[str, object], path: str) -> CameraFi
         host = camera["host"]
         if not isinstance(host, str) or not host.strip():
             raise ConfigFileError(f"{path}: camera.host must be a non-empty string")
+        # A host is a bare name or IP. Leading/trailing spaces are a common
+        # copy-paste slip and are harmless once stripped; anything else (an
+        # embedded space, a scheme, or a path) would build a silently broken
+        # URL whose failure only surfaces later as a confusing unreachable
+        # error, so refuse it now and say why.
+        host = host.strip()
+        if any(char.isspace() for char in host):
+            raise ConfigFileError(f"{path}: camera.host must not contain whitespace (got {host!r})")
+        if "://" in host or "/" in host:
+            raise ConfigFileError(
+                f"{path}: camera.host must be a bare host name or IP address, "
+                f"without a scheme or path (got {host!r}); use 'tls' to select "
+                f"https/rtsps"
+            )
         fields["host"] = host
     if "user" in camera:
         fields["user"] = _require_string(camera["user"], "user", path)

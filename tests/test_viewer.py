@@ -2,7 +2,9 @@
 
 import io
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -1520,6 +1522,45 @@ class ConfigFileTests(unittest.TestCase):
         self.assertIn(path, str(ctx.exception))
         self.assertIn("not valid JSON", str(ctx.exception))
 
+    def test_a_non_utf8_file_is_refused_cleanly(self):
+        path = Path(tempfile.mkdtemp()) / "camera.json"
+        path.write_bytes(b'{"camera": {"host": "\xff\xfe"}}')
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(str(path))
+        self.assertIn(str(path), str(ctx.exception))
+        self.assertIn("UTF-8", str(ctx.exception))
+
+    def test_a_bom_ed_file_still_loads(self):
+        # A Windows editor save: UTF-8 BOM + valid JSON, not a decode error.
+        path = Path(tempfile.mkdtemp()) / "camera.json"
+        path.write_bytes(b"\xef\xbb\xbf" + b'{"camera": {"host": "bomcam"}}')
+        self.assertEqual(config_file.load(str(path)), {"host": "bomcam"})
+
+    def test_a_duplicate_key_is_refused_and_named(self):
+        path = self._write('{"camera": {"host": "a", "host": "b"}}')
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn("host", str(ctx.exception))
+        self.assertIn("repeat", str(ctx.exception).lower())
+
+    def test_surrounding_whitespace_on_host_is_stripped(self):
+        path = self._write({"camera": {"host": " 10.0.0.1 "}})
+        self.assertEqual(config_file.load(path), {"host": "10.0.0.1"})
+
+    def test_embedded_whitespace_in_host_is_refused(self):
+        path = self._write({"camera": {"host": "10.0.0 .1"}})
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn("whitespace", str(ctx.exception))
+
+    def test_a_host_scheme_or_path_is_refused(self):
+        for host in ("http://10.0.0.1", "https://cam.lan", "10.0.0.1/x"):
+            with self.subTest(host=host):
+                path = self._write({"camera": {"host": host}})
+                with self.assertRaises(config_file.ConfigFileError) as ctx:
+                    config_file.load(path)
+                self.assertIn("scheme", str(ctx.exception))
+
     def test_a_non_object_top_level_is_refused(self):
         path = self._write([{"host": "cam"}])
         with self.assertRaises(config_file.ConfigFileError) as ctx:
@@ -1690,6 +1731,118 @@ class ConfigFileTests(unittest.TestCase):
         _, notes = config_file.resolve_camera({}, {"tls": False, "rtsp_tls": True})
         self.assertEqual(len(notes), 1)
         self.assertIn("verification is off", notes[0])
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# viewer.config computes every derived constant at import, so the only honest
+# way to exercise its wiring is a fresh interpreter with a known environment.
+_CONFIG_PROBE = r"""
+import json
+
+from viewer import config, streams
+
+print(json.dumps({
+    "config_error": config.CONFIG_ERROR,
+    "isapi_scheme": config.ISAPI_SCHEME,
+    "rtsp_scheme": config.RTSP_SCHEME,
+    "cam_base": config.CAM_BASE,
+    "rtsp_base": config.RTSP_BASE,
+    "cam_tls": config.CAM_TLS,
+    "cam_rtsp_tls": config.CAM_RTSP_TLS,
+    "cam_tls_verify": config.CAM_TLS_VERIFY,
+    "cam_verify": config.CAM_VERIFY,
+    "ffmpeg_tls_options": streams._tls_input_options(),
+    "notes": config.CONFIG_NOTES,
+}))
+"""
+
+
+class ConfigModuleWiringTests(unittest.TestCase):
+    """viewer.config's import-time wiring of the camera settings.
+
+    The other config tests patch attributes or call config_file functions, which
+    leaves the seam that actually wires VIEWER_CONFIG to CAM_BASE/RTSP_BASE and
+    the TLS schemes unverified. This loads viewer.config in a subprocess with a
+    clean environment (import-time constants make in-process reload fragile for
+    os.environ and sys.modules), then asserts what the app would really use.
+    """
+
+    def _probe(self, env_overrides: dict[str, str]) -> dict:
+        env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(_REPO_ROOT)}
+        env.update(env_overrides)
+        proc = subprocess.run(
+            [sys.executable, "-c", _CONFIG_PROBE],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(_REPO_ROOT),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def _write_config(self, payload) -> str:
+        path = Path(tempfile.mkdtemp()) / "camera.json"
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        return str(path)
+
+    def test_no_file_gives_todays_plain_defaults(self):
+        out = self._probe({})
+        self.assertIsNone(out["config_error"])
+        self.assertEqual(out["cam_base"], "http://192.168.0.156:80")
+        self.assertEqual(out["rtsp_base"], "rtsp://192.168.0.156:554")
+        self.assertEqual(out["isapi_scheme"], "http")
+        self.assertEqual(out["rtsp_scheme"], "rtsp")
+        self.assertFalse(out["cam_tls"])
+        self.assertFalse(out["cam_rtsp_tls"])
+        self.assertFalse(out["cam_verify"])
+        self.assertEqual(out["ffmpeg_tls_options"], [])
+
+    def test_tls_https_isapi_pairs_with_plain_rtsp(self):
+        path = self._write_config({"camera": {"tls": True, "rtsp_tls": False}})
+        out = self._probe({"VIEWER_CONFIG": path})
+        self.assertIsNone(out["config_error"])
+        self.assertEqual(out["cam_base"], "https://192.168.0.156:80")
+        self.assertEqual(out["rtsp_base"], "rtsp://192.168.0.156:554")
+        self.assertEqual(out["isapi_scheme"], "https")
+        self.assertEqual(out["rtsp_scheme"], "rtsp")
+        self.assertTrue(out["cam_tls"])
+        self.assertFalse(out["cam_rtsp_tls"])
+        self.assertEqual(out["ffmpeg_tls_options"], [])
+
+    def test_plain_isapi_pairs_with_rtsps(self):
+        path = self._write_config({"camera": {"tls": False, "rtsp_tls": True}})
+        out = self._probe({"VIEWER_CONFIG": path})
+        self.assertIsNone(out["config_error"])
+        self.assertEqual(out["cam_base"], "http://192.168.0.156:80")
+        self.assertEqual(out["rtsp_base"], "rtsps://192.168.0.156:554")
+        self.assertEqual(out["isapi_scheme"], "http")
+        self.assertEqual(out["rtsp_scheme"], "rtsps")
+        self.assertTrue(out["cam_rtsp_tls"])
+        self.assertEqual(out["ffmpeg_tls_options"], ["-tls_verify", "0"])
+
+    def test_a_broken_file_sets_config_error(self):
+        path = self._write_config("{not json")
+        out = self._probe({"VIEWER_CONFIG": path})
+        self.assertIsNotNone(out["config_error"])
+        self.assertIn(path, out["config_error"])
+
+
+class CameraWarningsTests(unittest.TestCase):
+    """The insecure-request warning is silenced only when verification is off."""
+
+    def _make(self, verify: bool) -> camera.Camera:
+        return camera.Camera("https://cam", "u", "p", "rtsp://cam:554", 1.0, verify=verify)
+
+    def test_a_verifying_camera_never_disables_warnings(self):
+        with mock.patch.object(camera.urllib3, "disable_warnings") as disable:
+            self._make(True)
+        disable.assert_not_called()
+
+    def test_a_non_verifying_camera_disables_the_insecure_request_warning(self):
+        with mock.patch.object(camera.urllib3, "disable_warnings") as disable:
+            self._make(False)
+        disable.assert_called_once_with(camera.urllib3.exceptions.InsecureRequestWarning)
 
 
 class StreamTlsTests(unittest.TestCase):
