@@ -23,7 +23,11 @@
     video.setAttribute("playsinline", "");
     var attempt = video.play();
     if (attempt && typeof attempt.catch === "function") {
-      attempt.catch(function () {
+      attempt.catch(function (err) {
+        if (err && err.name === "NotAllowedError") {
+          // Browser policy: only a real gesture can start playback here.
+          showTapStart(video);
+        }
         if (!gestureFallbackArmed) {
           gestureFallbackArmed = true;
           var resume = function () {
@@ -38,6 +42,25 @@
         }
       });
     }
+  }
+
+  function tapStartButton() {
+    return document.getElementById("tap-start");
+  }
+
+  function showTapStart(video) {
+    var btn = tapStartButton();
+    if (!btn) return;
+    btn.hidden = false;
+    btn.onclick = function () {
+      btn.hidden = true;
+      tryPlay(video);
+    };
+  }
+
+  function hideTapStart() {
+    var btn = tapStartButton();
+    if (btn) btn.hidden = true;
   }
   var pageKind = null;          // "live" | "play"
   var pageChannel = "101";
@@ -105,6 +128,7 @@
     var expected = Number(video.dataset.expected || 0);
     var t0 = null;
     var endedHandled = false;
+    var playedOnce = false; // distinguishes "autoplay blocked" from "user paused"
 
     function fmt(s) {
       s = Math.max(0, Math.floor(s));
@@ -128,8 +152,19 @@
     tryPlay(video);
 
     video.addEventListener("playing", function () {
+      playedOnce = true;
+      hideTapStart();
       setStatus("ok", opts.live ? "Live" : "Playing");
       if (opts.kind === "play" && !t0) t0 = Date.now();
+    });
+    video.addEventListener("pause", function () {
+      // Prompt only when playback never started (browser policy blocked it).
+      // A deliberate pause after watching is the user's business.
+      window.setTimeout(function () {
+        if (!playedOnce && video.paused && video.readyState >= 2 && !video.ended) {
+          showTapStart(video);
+        }
+      }, 3000);
     });
     video.addEventListener("waiting", function () {
       setStatus("connect", opts.live ? "Buffering…" : undefined);
@@ -175,6 +210,9 @@
           setStatus("ok", opts.live ? "Live" : "Playing");
         }
         tryPlay(video); // data is buffered now — the most likely moment to succeed
+        window.setTimeout(function () {
+          if (!playedOnce && video.paused && video.readyState >= 2) showTapStart(video);
+        }, 1200);
       });
       if (opts.live) {
         // Honest live latency: camera GOPs vary, so measure instead of promising.
