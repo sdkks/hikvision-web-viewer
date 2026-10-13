@@ -61,6 +61,38 @@ RECORDINGS = """<h1>Recordings</h1>
 </div>
 </form>
 </details>
+<h2>Browse by time</h2>
+<div class="picker" id="picker">
+<div class="picker-head">
+<label class="picker-day" for="pick-date">Jump to a day
+<input type="date" id="pick-date" name="date">
+</label>
+</div>
+<div class="chips" id="recent-days" aria-label="Recent days"></div>
+<p id="picker-status" class="status" role="status"><span class="dot"></span><span class="label"></span></p>
+<section id="day-view" hidden>
+<h3 id="day-heading" tabindex="-1"></h3>
+<p class="legend" aria-hidden="false">
+<span><span class="swatch none"></span>no recording</span>
+<span><span class="swatch part"></span>partial</span>
+<span><span class="swatch full"></span>full</span>
+<span><span class="swatch unknown"></span>couldn't check</span>
+</p>
+<div class="hourgrid" id="hour-grid" role="group" aria-label="Hours of the day"></div>
+</section>
+<section id="hour-view" hidden>
+<h3 id="hour-heading" tabindex="-1"></h3>
+<div class="scrubwrap">
+<p id="scrub-readout" class="muted"></p>
+<input type="range" id="scrubber" min="0" max="59" step="1" value="0" aria-label="Minute of the hour">
+</div>
+<div class="ranges" id="range-rows"></div>
+<div class="playbar" id="play-bar" hidden>
+<a class="playbtn" id="play-from" href="#">&#9654; Play from</a>
+</div>
+<p class="muted" id="play-note" hidden>Playback starts a few seconds before the chosen minute (at the nearest keyframe).</p>
+</section>
+</div>
 $results
 """
 

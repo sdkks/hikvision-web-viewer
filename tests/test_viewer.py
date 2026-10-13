@@ -1,11 +1,11 @@
 """Unit tests for time/URI helpers and the mock camera pipeline."""
 
 import unittest
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from viewer import app as viewer_app
-from viewer import camera, config, util
+from viewer import camera, config, coverage, util
 
 
 class TimeTests(unittest.TestCase):
@@ -103,6 +103,67 @@ class IsoToCamTests(unittest.TestCase):
 
     def test_garbage_returns_empty(self):
         self.assertEqual(camera._iso_to_cam("not-a-date"), "")
+
+
+class CoverageTests(unittest.TestCase):
+    """Day coverage aggregation for the picker (pure logic)."""
+
+    def _clip(self, start_cam, end_cam, size=1000):
+        return camera.Clip(
+            uri="rtsp://x",
+            uri_escaped="rtsp://x",
+            start_utc=start_cam,
+            end_utc=end_cam,
+            name="n",
+            size=size,
+            duration_s=int(
+                (util.parse_cam_time(end_cam) - util.parse_cam_time(start_cam)).total_seconds()
+            ),
+        )
+
+    def test_buckets_and_merge(self):
+        day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
+        # two adjacent clips inside hour 3 local: 03:10-03:20 and 03:20-03:40
+        base = day.replace(hour=3, minute=10)
+        clips = [
+            self._clip(
+                util.to_cam_time(base.astimezone(timezone.utc)),
+                util.to_cam_time((base + timedelta(minutes=10)).astimezone(timezone.utc)),
+                size=100,
+            ),
+            self._clip(
+                util.to_cam_time((base + timedelta(minutes=10)).astimezone(timezone.utc)),
+                util.to_cam_time((base + timedelta(minutes=30)).astimezone(timezone.utc)),
+                size=200,
+            ),
+        ]
+        built = coverage.build_coverage(clips, day)
+        self.assertEqual(built["hours"][3], 2)  # 30 of 60 minutes covered
+        self.assertEqual(sum(built["minutes"][3]), 30 * coverage.MINUTE_COVERED)
+        self.assertEqual(built["hour_clips"][3], 2)
+        self.assertEqual(len(built["ranges"]), 1)  # merged into one range
+        self.assertEqual(built["ranges"][0]["dur_s"], 1800)
+        self.assertEqual(built["ranges"][0]["clips"], 2)
+        self.assertEqual(built["ranges"][0]["size"], 300)
+        self.assertEqual(built["hours"][5], 0)
+
+    def test_clips_outside_the_day_are_clamped_away(self):
+        day = datetime(2026, 10, 13, tzinfo=datetime.now().astimezone().tzinfo)
+        other = day + timedelta(days=2)
+        clip = self._clip(
+            util.to_cam_time(other.replace(hour=1).astimezone(timezone.utc)),
+            util.to_cam_time(other.replace(hour=2).astimezone(timezone.utc)),
+        )
+        built = coverage.build_coverage([clip], day)
+        self.assertEqual(built["hours"], [0] * 24)
+        self.assertEqual(built["ranges"], [])
+
+    def test_levels_quantize(self):
+        self.assertEqual(coverage._level(0), 0)
+        self.assertEqual(coverage._level(5), 1)
+        self.assertEqual(coverage._level(30), 2)
+        self.assertEqual(coverage._level(50), 3)
+        self.assertEqual(coverage._level(60), 4)
 
 
 class StorageParseTests(unittest.TestCase):

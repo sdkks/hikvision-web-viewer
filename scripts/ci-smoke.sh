@@ -46,6 +46,11 @@ if pgrep -x ffmpeg >/dev/null 2>&1; then
     exit 1
 fi
 
+echo "== coverage API and picker markup"
+curl -sf -m 10 "${BASE}/api/coverage?date=$(date +%F)" | grep -q '"state"'
+curl -sf -m 5 "${BASE}/recordings" | grep -q "hour-grid"
+curl -sf -m 5 "${BASE}/recordings" | grep -q "scrubber"
+
 echo "== recordings page renders"
 curl -sf -m 5 "${BASE}/recordings" | grep -q "Recordings"
 

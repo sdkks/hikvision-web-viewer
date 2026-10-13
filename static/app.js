@@ -253,6 +253,364 @@
     attach(video, video.dataset.url, { live: false, kind: "play" });
   }
 
+  /* ── time picker (recordings page) ──────────────────────────────
+     Availability-driven drill-down: day -> hour tiles -> minute scrubber -> play.
+     One camera search per day (cached); states mirror the server's honesty enum. */
+
+  function initPicker() {
+    const dateInput = document.getElementById("pick-date");
+    const grid = document.getElementById("hour-grid");
+    if (!dateInput || !grid) return;
+
+    const chipsBox = document.getElementById("recent-days");
+    const statusLine = document.getElementById("picker-status");
+    const dayView = document.getElementById("day-view");
+    const dayHeading = document.getElementById("day-heading");
+    const hourView = document.getElementById("hour-view");
+    const hourHeading = document.getElementById("hour-heading");
+    const readout = document.getElementById("scrub-readout");
+    const scrubber = document.getElementById("scrubber");
+    const rangeRows = document.getElementById("range-rows");
+    const playBar = document.getElementById("play-bar");
+    const playFrom = document.getElementById("play-from");
+
+    const cache = new Map();
+    const state = { date: null, hour: null, minute: null, coverage: null };
+    const pad = (n) => String(n).padStart(2, "0");
+    const isoDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const camTime = (epoch) =>
+      new Date(epoch * 1000).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    const hhmm = (epoch) => {
+      const d = new Date(epoch * 1000);
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    const dayLabel = (iso) =>
+      new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, {
+        weekday: "short", day: "numeric", month: "short", year: "numeric",
+      });
+
+    function setStatus(kind, text) {
+      const dot = statusLine.querySelector(".dot");
+      const label = statusLine.querySelector(".label");
+      if (dot) dot.className = "dot" + (kind ? " " + kind : "");
+      if (label) label.textContent = text || "";
+    }
+
+    function recentDays() {
+      const out = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        out.push({ iso: isoDate(d), label: i === 0 ? "Today" : i === 1 ? "Yesterday"
+          : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }) });
+      }
+      return out;
+    }
+
+    function renderChips() {
+      chipsBox.textContent = "";
+      for (const day of recentDays()) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip";
+        chip.textContent = day.label;
+        chip.setAttribute("aria-pressed", String(day.iso === state.date));
+        chip.addEventListener("click", () => selectDate(day.iso, { push: true }));
+        chipsBox.append(chip);
+      }
+    }
+
+    function syncUrl(push) {
+      const params = new URLSearchParams(location.search);
+      for (const key of ["date", "hour", "min"]) params.delete(key);
+      if (state.date) params.set("date", state.date);
+      if (state.hour !== null) params.set("hour", String(state.hour));
+      if (state.minute !== null && state.hour !== null) params.set("min", String(state.minute));
+      const url = `${location.pathname}?${params.toString()}`;
+      history[push ? "pushState" : "replaceState"](null, "", url);
+    }
+
+    function selectDate(iso, opts) {
+      state.date = iso;
+      state.hour = null;
+      // A deep link may carry a minute; otherwise start clean.
+      state.minute = opts && opts.minute !== undefined ? opts.minute : null;
+      dateInput.value = iso;
+      renderChips();
+      hourView.hidden = true;
+      playBar.hidden = true;
+      loadDay(iso, opts);
+    }
+
+    async function loadDay(iso, opts) {
+      dayView.hidden = false;
+      if (cache.has(iso)) {
+        renderDay(cache.get(iso));
+      } else {
+        setStatus("spin", `Checking ${dayLabel(iso)}…`);
+        grid.textContent = "";
+        try {
+          const res = await fetch(`/api/coverage?date=${iso}`, { cache: "no-store" });
+          const payload = await res.json();
+          if (["ok", "empty"].includes(payload.state)) cache.set(iso, payload);
+          state.coverage = payload;
+          renderDay(payload);
+        } catch (err) {
+          state.coverage = null;
+          grid.textContent = "";
+          setStatus("err", `Couldn't reach the viewer: ${err}`);
+          return;
+        }
+      }
+      if (opts && opts.push) syncUrl(true);
+      else syncUrl(false);
+      if (opts && opts.focusHour !== undefined) {
+        selectHour(opts.focusHour, { push: !!opts.push, minute: opts.minute });
+      }
+    }
+
+    function coverageUnknown(payload) {
+      return payload && ["service_down", "unreachable", "bad_response"].includes(payload.state);
+    }
+
+    function renderDay(payload) {
+      grid.textContent = "";
+      const clips = payload.hour_clips.reduce((a, b) => a + b, 0);
+      const unknown = coverageUnknown(payload);
+      dayHeading.textContent = unknown
+        ? dayLabel(payload.date)
+        : `${dayLabel(payload.date)} · ${clips} clip${clips === 1 ? "" : "s"}`;
+
+      if (unknown) {
+        const messages = {
+          service_down: "The camera's search service isn't responding (known to be flaky). Live view still works — try again.",
+          unreachable: "Camera unreachable.",
+          bad_response: "Unexpected search reply (possible firmware drift). Live view still works.",
+        };
+        setStatus("warn", messages[payload.state] || "Couldn't check this day.");
+      } else if (payload.state === "empty") {
+        setStatus("", `No recordings on ${dayLabel(payload.date)}.`);
+      } else if (payload.state === "truncated") {
+        setStatus("warn", "This day has more clips than one query returns — coverage may be incomplete.");
+      } else {
+        setStatus("ok", `Checked ${dayLabel(payload.date)}.`);
+      }
+
+      const now = new Date();
+      const isToday = isoDate(now) === payload.date;
+      for (let hour = 0; hour < 24; hour++) {
+        const level = payload.hours[hour];
+        const tile = document.createElement("button");
+        tile.type = "button";
+        tile.className = `hour-tile lvl-${level}${unknown ? " unknown" : ""}`;
+        if (isToday && now.getHours() === hour) tile.classList.add("now");
+        tile.dataset.hour = String(hour);
+        tile.setAttribute("aria-pressed", "false");
+        const count = payload.hour_clips[hour];
+        tile.setAttribute(
+          "aria-label",
+          `${pad(hour)}:00, ${count} clip${count === 1 ? "" : "s"}, ` +
+            (unknown ? "couldn't check" : level === 0 ? "no recording" : "recorded")
+        );
+        tile.innerHTML =
+          `<span class="h">${pad(hour)}</span>` +
+          `<span class="n">${count ? "·" + count : ""}</span>` +
+          `<span class="meter" aria-hidden="true"><span></span></span>`;
+        if (!unknown) {
+          tile.addEventListener("click", () => selectHour(hour, { push: true }));
+        } else {
+          tile.disabled = true;
+        }
+        grid.append(tile);
+      }
+    }
+
+    function selectHour(hour, opts) {
+      if (!state.coverage) return;
+      const keepMinute = opts && opts.minute !== undefined ? opts.minute : null;
+      state.hour = hour;
+      state.minute = keepMinute;
+      hourView.hidden = false;
+      const iso = state.coverage.date;
+      hourHeading.textContent = `${dayLabel(iso).replace(/ \d{4}$/, "")} · ${pad(hour)}:00`;
+      for (const tile of grid.querySelectorAll(".hour-tile")) {
+        tile.setAttribute("aria-pressed", String(Number(tile.dataset.hour) === hour));
+      }
+      renderHour();
+      if (opts && opts.push) syncUrl(true);
+      hourHeading.focus({ preventScroll: true });
+    }
+
+    function rangesInHour(hour) {
+      const dayStart = new Date(`${state.coverage.date}T00:00:00`).getTime() / 1000;
+      const from = dayStart + hour * 3600;
+      const to = from + 3600;
+      return state.coverage.ranges.filter((r) => r.start_epoch < to && r.end_epoch > from);
+    }
+
+    function renderHour() {
+      const hour = state.hour;
+      const minutes = state.coverage.minutes[hour];
+      const ranges = rangesInHour(hour);
+      const covered = minutes.map((m, i) => (m > 0 ? i : -1)).filter((i) => i >= 0);
+
+      // minute strip: covered minutes filled, empty minutes paper
+      const cells = [];
+      for (let i = 0; i < 60; i++) {
+        const on = minutes[i] > 0;
+        cells.push(`${on ? "var(--cov-4)" : "var(--inset)"} ${(i / 60) * 100}% ${((i + 1) / 60) * 100}%`);
+      }
+      scrubber.style.setProperty("--track", `linear-gradient(to right, ${cells.join(",")})`);
+      scrubber.disabled = covered.length === 0;
+
+      if (covered.length === 0) {
+        readout.textContent = `Nothing recorded in ${pad(hour)}:00–${pad(hour)}:59.`;
+        scrubber.value = "0";
+        playBar.hidden = true;
+        const emptyNote = document.getElementById("play-note");
+        if (emptyNote) emptyNote.hidden = true;
+        rangeRows.textContent = "";
+        return;
+      }
+      const initial = state.minute !== null && minutes[state.minute] > 0 ? state.minute : covered[0];
+      scrubber.value = String(initial);
+      updateMinute(initial, { push: false });
+
+      rangeRows.textContent = "";
+      for (const range of ranges) {
+        const row = document.createElement("div");
+        row.className = "range-row";
+        row.innerHTML =
+          `<span class="when">${hhmm(range.start_epoch)} → ${hhmm(range.end_epoch)}</span>` +
+          `<span class="meta">${humanDuration(range.dur_s)} · ${humanSize(range.size)}` +
+          (range.clips > 1 ? ` · ${range.clips} clips` : "") + `</span>`;
+        const acts = document.createElement("span");
+        acts.className = "acts";
+        const play = document.createElement("a");
+        play.className = "playbtn";
+        play.textContent = "▶ Play";
+        play.href = playHref(range.start_epoch, range.end_epoch, range.size);
+        const dl = document.createElement("a");
+        dl.className = "dlbtn";
+        dl.textContent = "⬇ Download";
+        dl.href = `/download?from=${camTime(range.start_epoch)}&to=${camTime(range.end_epoch)}&size=${range.size}`;
+        acts.append(play, dl);
+        row.append(acts);
+        rangeRows.append(row);
+      }
+    }
+
+    function humanDuration(seconds) {
+      const s = Math.max(0, Math.round(seconds));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+      if (h) return `${h} h ${pad(m)} min`;
+      if (m) return `${m} min ${pad(r)} s`;
+      return `${r} s`;
+    }
+
+    function humanSize(bytes) {
+      const units = ["B", "KB", "MB", "GB"];
+      let value = Math.max(0, bytes), i = 0;
+      while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+      return `${i === 0 ? value : value.toFixed(1)} ${units[i]}`;
+    }
+
+    function playHref(fromEpoch, toEpoch, size) {
+      const dur = Math.max(1, toEpoch - fromEpoch);
+      return `/play?from=${camTime(fromEpoch)}&to=${camTime(toEpoch)}&dur=${dur}&size=${size}`;
+    }
+
+    function containingRange(epoch) {
+      // Overlap by minute: the selected minute is covered when any part of it
+      // falls inside the recording (ranges start/end at second precision).
+      return (state.coverage.ranges || []).find(
+        (r) => r.start_epoch < epoch + 60 && r.end_epoch > epoch
+      );
+    }
+
+    function playStart(epoch, range) {
+      // Never ask the camera for a time before the recording begins.
+      return Math.max(epoch, range.start_epoch);
+    }
+
+    function snapToCovered(minute) {
+      const minutes = state.coverage.minutes[state.hour];
+      if (minutes[minute] > 0) return minute;
+      for (let d = 1; d < 60; d++) {
+        if (minute + d < 60 && minutes[minute + d] > 0) return minute + d;
+        if (minute - d >= 0 && minutes[minute - d] > 0) return minute - d;
+      }
+      return minute;
+    }
+
+    function updateMinute(minute, opts) {
+      state.minute = minute;
+      const minutes = state.coverage.minutes[state.hour];
+      const range = containingRange(epochOf(minute));
+      const covered = minutes[minute] > 0;
+      const from = range ? playStart(epochOf(minute), range) : 0;
+      readout.textContent = range
+        ? `${pad(state.hour)}:${pad(minute)} · recording (` +
+          humanDuration(range.end_epoch - from) + ` from ${hhmm(epochOf(minute))})`
+        : `${pad(state.hour)}:${pad(minute)} · no recording`;
+      scrubber.setAttribute(
+        "aria-valuetext",
+        `${pad(state.hour)}:${pad(minute)}, ${covered ? "recording" : "no recording"}`
+      );
+      const playNote = document.getElementById("play-note");
+      if (range) {
+        playBar.hidden = false;
+        if (playNote) playNote.hidden = false;
+        playFrom.href = playHref(from, range.end_epoch, range.size);
+        playFrom.textContent = `▶ Play from ${hhmm(from)} (${humanDuration(range.end_epoch - from)}, plays in real time)`;
+      } else {
+        playBar.hidden = true;
+        if (playNote) playNote.hidden = true;
+      }
+      if (opts && opts.push) syncUrl(true);
+      else syncUrl(false);
+    }
+
+    function epochOf(minute) {
+      const dayStart = new Date(`${state.coverage.date}T00:00:00`).getTime() / 1000;
+      return dayStart + state.hour * 3600 + minute * 60;
+    }
+
+    dateInput.addEventListener("change", () => {
+      if (dateInput.value) selectDate(dateInput.value, { push: true });
+    });
+    scrubber.addEventListener("input", () => {
+      const snapped = snapToCovered(Number(scrubber.value));
+      scrubber.value = String(snapped);
+      updateMinute(snapped, { push: false });
+    });
+    scrubber.addEventListener("change", () => {
+      const snapped = snapToCovered(Number(scrubber.value));
+      updateMinute(snapped, { push: true });
+    });
+    window.addEventListener("popstate", () => applyUrl({ focus: false }));
+
+    function applyUrl(opts) {
+      const params = new URLSearchParams(location.search);
+      const date = params.get("date");
+      if (!date) return;
+      const hourRaw = params.get("hour");
+      const minRaw = params.get("min");
+      const hour = hourRaw === null ? null : Number(hourRaw);
+      const minute = minRaw === null ? undefined : Number(minRaw);
+      selectDate(date, {
+        push: false,
+        minute: minute,
+        focusHour: hour === null ? undefined : hour,
+      });
+      void opts;
+    }
+
+    dateInput.value = isoDate(new Date());
+    renderChips();
+    applyUrl({ focus: false });
+  }
+
   /* ── boot ─────────────────────────────────────────────────────── */
 
   document.addEventListener("DOMContentLoaded", function () {
@@ -260,6 +618,7 @@
     var clip = document.getElementById("clip-video");
     if (live) initLive(live);
     if (clip) initPlayback(clip);
+    initPicker();
 
     document.querySelectorAll("form.search").forEach(function (form) {
       form.addEventListener("submit", function () {

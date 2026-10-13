@@ -13,6 +13,9 @@ services:
     environment:
       # Reachable from the LAN / other devices; credentials come from config.env.
       VIEWER_BIND: 0.0.0.0
+      # Display timezone (container default is UTC): controls the times shown in
+      # the UI and the day boundaries used by the recordings picker.
+      TZ: Asia/Singapore
       # Weak NAS CPU? Prefer the 360p sub channel as the default live view:
       # VIEWER_DEFAULT_CHANNEL: "102"
       # Offline demo without a camera:

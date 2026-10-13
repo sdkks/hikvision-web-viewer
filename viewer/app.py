@@ -3,11 +3,13 @@
 import base64
 import hmac
 import html
+import json
+from datetime import datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import camera, config, streams, templates, util
+from . import camera, config, coverage, streams, templates, util
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 STATIC_TYPES = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml"}
@@ -407,6 +409,63 @@ class ViewerApp:
             return self.route_hls_media(handler, parts[1], parts[2])
         handler.send_error(404)
 
+    def route_coverage(self, handler, query: dict):
+        """Day coverage map for the picker: hours/minutes levels + merged ranges.
+
+        One camera search per request; the client caches per date. States mirror
+        the honesty contract so "search down" never looks like "no recordings".
+        """
+        raw_date = (query.get("date", [""])[0] or "").strip()
+        try:
+            day = datetime.fromisoformat(raw_date).date()
+        except ValueError:
+            self.send_json(
+                handler, {"state": "bad_request", "state_detail": "date=YYYY-MM-DD"}, 400
+            )
+            return
+        day_start = datetime.combine(day, time.min).astimezone()
+        day_end = day_start + timedelta(days=1)
+        payload = {
+            "date": day.isoformat(),
+            "tz": str(datetime.now().astimezone().tzname()),
+            "state": "ok",
+            "state_detail": "",
+            "hours": [0] * 24,
+            "hour_clips": [0] * 24,
+            "minutes": [[0] * 60 for _ in range(24)],
+            "ranges": [],
+        }
+        try:
+            clips = self.cam.search(
+                util.iso_search_time(day_start), util.iso_search_time(day_end), max_results=200
+            )
+        except camera.ServiceDownError as exc:
+            payload.update(state="service_down", state_detail=str(exc))
+        except camera.UnreachableError as exc:
+            payload.update(state="unreachable", state_detail=str(exc))
+        except camera.BadResponseError as exc:
+            payload.update(state="bad_response", state_detail=str(exc))
+        else:
+            if len(clips) >= 200:
+                payload["state"] = "truncated"
+                payload["state_detail"] = (
+                    "more clips than one query returns; coverage may be partial"
+                )
+            built = coverage.build_coverage(clips, day_start)
+            payload.update(built)
+            if payload["state"] == "ok" and not clips:
+                payload["state"] = "empty"
+        self.send_json(handler, payload)
+
+    def send_json(self, handler, payload: dict, code: int = 200):
+        body = json.dumps(payload).encode()
+        handler.send_response(code)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(body)
+
     def route_snapshot(self, handler, query: dict):
         channel = query.get("ch", ["101"])[0] or "101"
         if channel not in CHANNELS:
@@ -481,6 +540,8 @@ class ViewerApp:
             return self.route_hls(handler, path, query)
         if path in ("/hls-live-stop", "/hls-play-stop"):
             return self.route_hls_stop(handler, path, query)
+        if path == "/api/coverage":
+            return self.route_coverage(handler, query)
         if path == "/download":
             return self.route_download(handler, query)
         if path == "/snapshot":

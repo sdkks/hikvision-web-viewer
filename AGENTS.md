@@ -40,6 +40,7 @@ Browser: static/app.js (hls.js) ────────────────
 | `viewer/templates.py` | Server-rendered HTML (string templates, no framework) |
 | `viewer/config.py` | Environment configuration (single source of truth) |
 | `viewer/util.py` | Time/formatting/URI helpers (camera UTC <-> local time) |
+| `viewer/coverage.py` | Aggregates a day of clips into coverage buckets for the picker (pure) |
 | `static/app.js` | hls.js player, status states, visibility/pagehide lifecycle |
 | `static/style.css` | Dark, mobile-first design tokens |
 | `tests/test_viewer.py` | Unit tests (time math, parsing, auth, mock camera) |
@@ -100,7 +101,16 @@ working. Use the error model:
 Never collapse "service down" into "no recordings" — distinguishing them *is*
 the feature. Streaming/snapshots are the reliable floor; offer them everywhere.
 
-### 4. Secrets stay out of the repo
+### 4. The coverage picker stays honest
+
+`/api/coverage?date=YYYY-MM-DD` runs **one search per day** and returns
+`state` (`ok|empty|truncated|service_down|unreachable|bad_response`) plus hour
+and minute levels and merged ranges. The picker maps each state to distinct
+copy: "no recordings" is neutral; "service down" is a warning with Retry.
+Never let an unchecked day render as an empty day. The client caches per date
+and deep-links as `?date=&hour=&min=` (browser Back steps up a level).
+
+### 5. Secrets stay out of the repo
 
 Camera credentials and viewer auth live only in `config.env` (gitignored) or
 environment variables. `gitleaks` runs in pre-commit and will fail the commit.

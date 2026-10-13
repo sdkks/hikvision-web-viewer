@@ -4,8 +4,9 @@ A small, self-hosted web app to view a Hikvision camera **without the vendor clo
 Shows live view and recorded clips in the browser, honest about what the camera can and cannot do.
 
 - **Live view** — main (1080p) and sub (360p) channels, streamed as fragmented MP4 via ffmpeg.
-- **Recordings browser** — pick a range (presets or exact date/time), see motion clips, play them
-  in the browser at the camera's pace, with copyable rtsp/ffmpeg escape hatches.
+- **Recordings browser** — presets or exact range, plus a **browse-by-time picker**: pick a day,
+  see which hours have recordings, drill into an hour to see the recorded minutes, and play or
+  download from any point. Copyable rtsp/ffmpeg escape hatches included.
 - **Honest states** — the camera's search service is known to be flaky; the UI distinguishes
   "search down" from "no clips" from "camera unreachable", and always offers snapshot stills as a
   floor. No vendor cloud, no accounts.
@@ -44,6 +45,7 @@ No camera at hand? `HIK_MOCK=1 .venv/bin/python -m viewer.app` runs against buil
 | `HIK_MOCK` | unset | `1` = built-in fixtures, no device needed |
 | `VIEWER_BIND` / `VIEWER_PORT` | `127.0.0.1` / `8756` | Server bind address |
 | `VIEWER_AUTH_USER` / `VIEWER_AUTH_PASSWORD` | empty | When both are set, HTTP Basic Auth is required for the whole viewer |
+| `TZ` | host | Display timezone. Containers default to UTC — set it (e.g. `Asia/Singapore`) or all times and day boundaries shift |
 
 Credentials are read from the environment only — never committed. `config.env` is gitignored.
 
