@@ -15,6 +15,8 @@ vendor cloud or app**:
 - **Live view** — main/sub channel, streamed as HLS (fragmented TS) to the browser
 - **Recordings** — ISAPI search over the SD card, in-browser playback, clip download
 - **Downloads** — full clips over HTTP via ISAPI's `ContentMgmt/download` (~4x realtime)
+- **Motion zones** — read/paint the camera's motion-detection grid (18x22) over a still,
+  set sensitivity, toggle detection, apply with a readback
 - No cloud dependency, no accounts, LAN-only by default
 
 ## Request flow (how a frame reaches the screen)
@@ -41,9 +43,10 @@ Browser: static/app.js (hls.js) ────────────────
 | `viewer/config.py` | Environment configuration (single source of truth) |
 | `viewer/util.py` | Time/formatting/URI helpers (camera UTC <-> local time) |
 | `viewer/coverage.py` | Aggregates a day of clips into coverage buckets for the picker (pure) |
+| `viewer/motion.py` | Motion grid encode/decode + zone operations (pure); the single source of bit order |
 | `static/app.js` | hls.js player, status states, visibility/pagehide lifecycle |
 | `static/style.css` | Dark, mobile-first design tokens |
-| `tests/test_viewer.py` | Unit tests (time math, parsing, auth, mock camera) |
+| `tests/test_viewer.py` | Unit tests (time math, parsing, auth, mock camera, motion grid + API guard) |
 | `scripts/ci-smoke.sh` | Integration smoke test used by CI (mock session, HLS, stop, no-ffmpeg) |
 | `.github/workflows/ci.yml` | Gates on ubuntu-26.04 amd64 + arm64 |
 | `.github/workflows/container.yml` | Multi-arch container publish to GHCR on tags |
@@ -101,6 +104,12 @@ working. Use the error model:
 Never collapse "service down" into "no recordings" — distinguishing them *is*
 the feature. Streaming/snapshots are the reliable floor; offer them everywhere.
 
+**A control that displays camera state must render an explicit unknown state
+until the camera has actually answered.** Never pre-paint a plausible-looking
+default: a viewer that shows an all-masked zone map before (or without) a
+successful read is worse than one showing nothing, because the wrong answer
+looks exactly like a real one.
+
 ### 4. The coverage picker stays honest
 
 `/api/coverage?date=YYYY-MM-DD` runs **one search per day** and returns
@@ -115,6 +124,34 @@ and deep-links as `?date=&hour=&min=` (browser Back steps up a level).
 Camera credentials and viewer auth live only in `config.env` (gitignored) or
 environment variables. `gitleaks` runs in pre-commit and will fail the commit.
 Never hardcode credentials in source, tests, docs, or compose files.
+
+### 6. The motion write is the only mutating endpoint
+
+`POST /api/motion` changes state on the camera, so it carries obligations the rest of
+the app does not. Keep all five when touching it:
+
+1. **Same-origin only.** With Basic Auth a browser attaches credentials automatically,
+   so a cross-site form could otherwise drive it. Reject a mismatched `Origin` (when
+   present) and require a JSON content type. That pair alone is not enough: a
+   DNS-rebinding page controls both `Origin` and `Host`, so the request is also
+   refused unless `Host` names the viewer (loopback names, a specific `VIEWER_BIND`
+   address, or an entry in `VIEWER_ALLOWED_HOSTS`). Keep that allowlist tight and
+   name the variable in the refusal so a LAN or reverse-proxy user can fix it.
+2. **Read-modify-write.** GET the camera's document, change only the fields the viewer
+   owns, PUT the merged document back — never hand-build a minimal body.
+3. **The readback is the truth.** After writing, GET again and report what the camera
+   actually stored, including drift: this firmware accepts a sensitivity outside the
+   six valid steps with `200` and silently keeps the old value. Never report success
+   from the request alone, and never report an unobserved failure either — on a PUT
+   timeout, re-GET and compare before saying anything.
+4. **Namespace.** Register the default XML namespace before serialising
+   (`ET.register_namespace("", "http://www.hikvision.com/ver20/XMLSchema")`); a body
+   emitted with `ns0:` prefixes is rejected with `400`.
+5. **One source of bit order.** All grid encode/decode lives in `viewer/motion.py`,
+   following the vendor rule: first cell upper-left, then left to right, then top to
+   bottom, `1` = detect. Two documented assumptions live there — rows run from the top
+   of the image, and the 18x22 grid spans the whole streamed frame (`GRID_SPANS_FRAME`).
+   Keep them visible rather than burying them.
 
 ---
 
@@ -131,6 +168,7 @@ All configuration is environment-based (`viewer/config.py`):
 | `VIEWER_BIND` / `VIEWER_PORT` | `127.0.0.1` / `8756` | Server bind address |
 | `VIEWER_DEFAULT_CHANNEL` | `101` | Default live channel (`102` on weak CPUs) |
 | `VIEWER_AUTH_USER` / `VIEWER_AUTH_PASSWORD` | empty | When both set, HTTP Basic Auth is required for everything |
+| `VIEWER_ALLOWED_HOSTS` | empty | Extra host names accepted in the `Host` header (comma-separated, ports ignored) |
 
 `config.env.example` documents the format; `config.env` is the local copy.
 
@@ -172,6 +210,12 @@ Commit messages are Conventional Commits (`feat:`, `fix:`, `docs:`, …) — the
 `tests/test_viewer.py` covers time conversion, playback-URI parsing, the error
 model, auth, and the mock camera. Add tests for any pure-logic change. The suite
 must stay fast (<1s) and dependency-free beyond `requests`.
+
+**Tests never write to a real camera.** The device is read-only for the suite and for
+any agent verifying a change: GET requests are fine, every write path is exercised
+against `MockCamera` / `HIK_MOCK=1`. The motion grid has one vendor-documented test
+vector in the suite (108 hex characters from Hikvision's ISAPI IPMD guide) so the bit
+order can never drift silently.
 
 ### Verifying streams by hand (no browser needed)
 

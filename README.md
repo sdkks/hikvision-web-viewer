@@ -8,6 +8,16 @@ Shows live view and recorded clips in the browser, honest about what the camera 
   **browse-by-time picker**: pick a day,
   see which hours have recordings, drill into an hour to see the recorded minutes, and play or
   download from any point. Copyable rtsp/ffmpeg escape hatches included.
+- **Motion zones** — read the camera's motion detection configuration and paint which cells count as
+  motion: an 18 x 22 grid drawn over a live still, an Arm/Mask brush with drag painting, a 12-zone
+  quick map for small screens, a sensitivity control, and an on/off switch. Applying writes the
+  merged document and then **reads it back** — the page reports what the camera stored, and says so
+  when the camera changes or ignores something. Zones can be painted while detection is off, with
+  the page stating plainly that they do nothing until it is on.
+- **Jump between clips** — the player lists the five earlier and five later recordings, each labelled
+  with the gap a jump would skip (so a jump across missing time never looks continuous), and can
+  chain to the next recording automatically. That auto-advance is opt-in, counted down visibly, and
+  cancellable.
 - **Honest states** — the camera's search service is known to be flaky; the UI distinguishes
   "search down" from "no clips" from "camera unreachable", and always offers snapshot stills as a
   floor. No vendor cloud, no accounts.
@@ -16,7 +26,8 @@ Shows live view and recorded clips in the browser, honest about what the camera 
 
 - Python 3.14+
 - ffmpeg on PATH (streams are `-c copy`; no transcoding)
-- A reachable Hikvision camera with ISAPI/RTSP enabled (tested on DS-2CV2121G2-IDW)
+- A reachable Hikvision camera with ISAPI/RTSP enabled and **digest authentication** turned on
+  (this firmware refuses Basic auth with `401`) — tested on DS-2CV2121G2-IDW, firmware V5.7.26
 
 ## Quick start
 
@@ -46,6 +57,7 @@ No camera at hand? `HIK_MOCK=1 .venv/bin/python -m viewer.app` runs against buil
 | `HIK_MOCK` | unset | `1` = built-in fixtures, no device needed |
 | `VIEWER_BIND` / `VIEWER_PORT` | `127.0.0.1` / `8756` | Server bind address |
 | `VIEWER_AUTH_USER` / `VIEWER_AUTH_PASSWORD` | empty | When both are set, HTTP Basic Auth is required for the whole viewer |
+| `VIEWER_ALLOWED_HOSTS` | empty | Extra host names accepted in the `Host` header (comma-separated, ports ignored) — see below |
 | `TZ` | host | Display timezone. Containers default to UTC — set it (e.g. `Asia/Singapore`) or all times and day boundaries shift |
 
 Credentials are read from the environment only — never committed. `config.env` is gitignored.
@@ -57,6 +69,25 @@ until credentials are supplied, so `http://user:pass@host:8756/` works in a
 browser (or any HTTP client with Basic Auth). Basic Auth sends credentials in
 plaintext over HTTP — put a TLS-terminating reverse proxy in front if the tool
 is exposed beyond a trusted LAN.
+
+### Reaching the viewer by name (`VIEWER_ALLOWED_HOSTS`)
+
+Requests that write to the camera — the motion-zone editor's Apply — are only
+accepted when the `Host` header names the viewer itself. `localhost`,
+`127.0.0.1`, `::1` and a specific `VIEWER_BIND` address always work, so an
+ordinary local setup needs no configuration.
+
+If you reach the viewer by any other name — a LAN hostname, or through a reverse
+proxy — list that host (comma-separated, ports ignored):
+
+```bash
+VIEWER_ALLOWED_HOSTS=viewer.local,cam.lan
+```
+
+A request presenting an unrecognised host is refused with a message naming that
+variable, even when its `Origin` matches. That is deliberate: comparing `Origin`
+with `Host` alone is satisfied by a DNS-rebinding page, which controls both
+values, and this endpoint changes what your camera treats as motion.
 
 ## Codec handling (H.264, H.265/HEVC, H.265+)
 
@@ -88,6 +119,41 @@ JavaScript or not.
 - The camera allows **one** playback session; starting a new one takes over the old.
 - Recording search is served by the camera's app layer, which on some firmware is unreliable —
   the UI names that state instead of pretending it is "no clips".
+
+## What this firmware exposes (verified on the device)
+
+Everything below was confirmed against a real DS-2CV2121G2-IDW running V5.7.26. It
+is what the viewer depends on, and it is the part that is most likely to differ on
+other models.
+
+- **Digest authentication is mandatory.** Every ISAPI request must use HTTP digest;
+  Basic auth is answered with `401`.
+- **Motion detection** is at
+  `GET/PUT /ISAPI/System/Video/inputs/channels/1/motionDetection` and is fully readable
+  *and* writable. The detection area is a grid of **18 rows by 22 columns**,
+  serialised as a 108-character hex `gridMap` (6 hex characters per row, the low two
+  bits of each row unused). Per Hikvision's ISAPI IPMD guide, *the first cell is the
+  upper-left corner, and the order then runs left to right and top to bottom*, with
+  `1` meaning "detect here" and `0` meaning "ignore".
+- **Sensitivity** is 0-100 in steps of 20, so only `0/20/40/60/80/100` mean anything.
+  Any other value is accepted with `HTTP 200` and **silently ignored** (the camera
+  keeps its previous level) — which is exactly why the viewer reads the value back
+  after every change instead of trusting the request.
+- **Writing means sending the whole document back.** The viewer reads the current
+  document, changes only the fields it owns, and PUTs the merged result. The XML must
+  keep the default namespace (`xmlns="http://www.hikvision.com/ver20/XMLSchema"`); a
+  body serialised with `ns0:` prefixes is rejected with `400`.
+- **Detection and recording mode are separate.** `/ISAPI/ContentMgmt/record/tracks`
+  shows the track schedule, and on this camera track 101 records continuously (`CMR`)
+  around the clock — hence the large clips. Turning motion detection on does **not** by
+  itself make recording motion-triggered; that is a change to the recording mode, and
+  the viewer does not make it for you.
+- **Unsupported on this firmware:** `/ISAPI/Event/triggers` and the record-plan
+  endpoints answer `403 Invalid Operation`, and the device's event stream carries
+  interface noise rather than motion events.
+- **ONVIF is off on this unit and unused by the viewer.** With ONVIF enabled, the
+  camera advertises device/media/events/analytics services but **no motion service**,
+  so zone configuration stays on ISAPI either way.
 
 ## Container image (GHCR)
 
@@ -123,7 +189,8 @@ closed, and idle sessions are reaped automatically. On a weak NAS CPU, set
 ```
 
 Layout: `viewer/camera.py` (ISAPI client + error model), `viewer/streams.py` (ffmpeg sessions),
-`viewer/app.py` (HTTP server + pages), `static/` (CSS + streaming client), `tests/`.
+`viewer/app.py` (HTTP server + pages), `viewer/motion.py` (motion grid encode/decode + zone
+operations, pure), `static/` (CSS + streaming client), `tests/`.
 
 ## License
 
