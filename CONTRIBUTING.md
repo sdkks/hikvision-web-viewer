@@ -83,6 +83,10 @@ review of those gates.
   and be stopped when no viewer is present.
 - **Codec handling stays automatic.** H.264 copies; everything else transcodes.
   Do not hardcode a codec in the ffmpeg builders.
+- **Dependencies live in `pyproject.toml`.** Runtime packages go under
+  `[project].dependencies`, dev and gate tools under `[dependency-groups].dev`.
+  `uv.lock` is committed and authoritative — run `uv lock` after any dependency
+  change; CI, `make setup` and the container install with `--frozen`.
 - **Never commit secrets.** Credentials belong in `config.env` (gitignored) or
   environment variables. `gitleaks` blocks accidental commits.
 - **Update the docs.** If you change configuration or behaviour, update
