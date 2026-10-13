@@ -1,21 +1,26 @@
 # Run the viewer with the camera described by a JSON file instead of HIK_* variables.
 #
-# Identical to compose.yaml except that it enables the VIEWER_CONFIG wiring that file
-# leaves commented out, and every path is relative to this directory - so the whole
-# tree can be copied (scp, rsync) to another host and started there unchanged:
+# This file pulls the published image and never builds: the ghcr package is public, so no
+# `docker login` is needed, and a small NAS never has to compile anything. For a build from
+# source (a development machine) use compose.yaml instead.
 #
-#   podman compose -f compose.camera-json.yaml up -d --build      # or: docker compose
+#   podman compose -f compose.camera-json.yaml up -d --pull always     # or: docker compose
+#
+# ":edge" tracks main and moves with every push. To pin exactly what you tested, use the
+# INDEX digest, which resolves on any architecture - the value shown as "Digest:" by
+# `docker buildx imagetools inspect ghcr.io/sdkks/hikvision-web-viewer:edge`, e.g.:
+#   image: ghcr.io/sdkks/hikvision-web-viewer@sha256:7fe7aecc9858fa2441d323b08fd0a86102e2405ab9b281e210c6d9a3491e7255
+# Do NOT pin one of the "unknown/unknown" entries GitHub lists next to the tag: those are
+# per-architecture build attestations, not images, and pulling one fails with "unsupported
+# image-specific operation on artifact with type application/vnd.docker.attestation.manifest.v1+json".
 #
 # camera.json holds the camera password in plaintext and is gitignored, like config.env,
-# which still supplies the viewer's own settings (bind, port, auth, TZ). The file wins
-# for the camera fields it sets; if it disagrees with HIK_* in config.env, startup says
-# so once. Use one file or the other, not both: they claim the same container name.
+# which still supplies the viewer's own settings (bind, port, auth, TZ). The file wins for
+# the camera fields it sets; if it disagrees with HIK_* in config.env, startup says so
+# once. Use one file or the other, not both: they claim the same container name.
 services:
   camera-viewer:
-    build:
-      context: .
-      dockerfile: Containerfile
-    image: sdkks/hikvision-web-viewer:local
+    image: ghcr.io/sdkks/hikvision-web-viewer:edge
     container_name: hikvision-web-viewer
     restart: unless-stopped
     ports:
