@@ -2038,10 +2038,17 @@
       renderCellsAll();
       commitStroke(before);
     });
-    document.getElementById("motion-apply").addEventListener("click", apply);
-    document.getElementById("motion-apply-top").addEventListener("click", apply);
-    document.getElementById("motion-discard").addEventListener("click", discard);
-    document.getElementById("motion-discard-top").addEventListener("click", discard);
+    // Bind whichever of these exist: the unsaved-changes notice is text only now
+    // that the primary pair sits directly above it in the tool column.
+    [
+      ["motion-apply", apply],
+      ["motion-apply-top", apply],
+      ["motion-discard", discard],
+      ["motion-discard-top", discard],
+    ].forEach(function (pair) {
+      var el = document.getElementById(pair[0]);
+      if (el) el.addEventListener("click", pair[1]);
+    });
 
     window.addEventListener("beforeunload", function (e) {
       if (state.ready && isDirty()) { e.preventDefault(); e.returnValue = ""; }

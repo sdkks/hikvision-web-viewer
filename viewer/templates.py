@@ -193,10 +193,6 @@ MOTION = Template("""<h1>Motion detection</h1>
 </p>
 <section id="motion-dirty" class="dirtybar" hidden>
 <p id="motion-dirty-text">Changes not applied.</p>
-<div class="row">
-<button type="button" id="motion-apply-top" class="searchbtn">Apply to camera</button>
-<button type="button" id="motion-discard-top" class="copybtn">Discard changes</button>
-</div>
 </section>
 <fieldset class="zgroup">
 <legend>Detection</legend>
