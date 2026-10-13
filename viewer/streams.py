@@ -526,6 +526,38 @@ def iter_download(session: Session, chunk_size: int = DOWNLOAD_CHUNK) -> Iterato
         yield data
 
 
+def has_media_fragment(buffer: bytes | bytearray) -> bool:
+    """True once ``buffer`` holds a fragmented-MP4 media fragment (a ``moof`` box).
+
+    ``empty_moov`` writes ``ftyp``+``moov`` (the init segment) before any frame,
+    so "the first bytes arrived" is true for a file with no media in it -- the
+    measured device failure was a 200 carrying 815 bytes and no frames. A
+    ``moof`` box is the first evidence of real media, so the download fallback
+    withholds its 200 until one is present in full. The box chain is walked from
+    the start rather than searching for the bytes, so a stray ``moof`` inside
+    another box's payload cannot be mistaken for media, and a ``moof`` box still
+    being written (its header present, its declared payload not yet complete) is
+    not mistaken for media either.
+    """
+    offset = 0
+    total = len(buffer)
+    while offset + 8 <= total:
+        size = int.from_bytes(buffer[offset : offset + 4], "big")
+        box_type = bytes(buffer[offset + 4 : offset + 8])
+        if size == 1:  # 64-bit extended size follows the type
+            if offset + 16 > total:
+                return False
+            size = int.from_bytes(buffer[offset + 8 : offset + 16], "big")
+            if size < 16:
+                return False
+        elif size < 8:  # 0 (to end of file) or malformed: no further boxes
+            return False
+        if box_type == b"moof":
+            return offset + size <= total
+        offset += size
+    return False
+
+
 def kill_all() -> None:
     """Kill every tracked session (server shutdown)."""
     with _sessions_lock:

@@ -21,6 +21,10 @@ CHANNELS = ("101", "102")
 
 # Download relay: stream the camera's file in 64 KiB chunks and never buffer it.
 DOWNLOAD_CHUNK = 64 * 1024
+# The fallback's error card carries ffmpeg's own stderr tail: the session log is
+# deleted with the session, so this is the only place the cause of a failure
+# survives for the next person who looks.
+_DOWNLOAD_STDERR_TAIL = 2000
 # A camera file name is alnum/underscore/dot/dash; the query string is untrusted,
 # so anything else is dropped rather than embedded in the ISAPI XML body.
 _DOWNLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
@@ -1222,8 +1226,20 @@ class ViewerApp:
         key = session["key"]
         try:
             chunks = streams.iter_download(session)
-            first = next((chunk for chunk in chunks if chunk), b"")
-            if not first:
+            # The fragmented MP4 opens with ftyp+moov (empty_moov), which ffmpeg
+            # writes before any frame: a "first bytes arrived" check reports an
+            # init-only, media-free file as a successful download (measured on the
+            # device: 200, 815 bytes, nothing playable). Hold the response until a
+            # media fragment (a moof box) has arrived, then send the 200 and relay
+            # everything held, in order, with nothing dropped or duplicated.
+            held = bytearray()
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                held += chunk
+                if streams.has_media_fragment(held):
+                    break
+            else:
                 detail = streams.download_error_text(session)
                 if "401" in detail or "Unauthorized" in detail:
                     self._download_error(
@@ -1234,10 +1250,16 @@ class ViewerApp:
                         code=502,
                     )
                 else:
+                    # The card names ffmpeg's own error: it is the only evidence
+                    # the failure leaves once the session log is reaped.
+                    stderr = detail.strip()
+                    remux_detail = "The playback stream could not be remuxed from the camera."
+                    if stderr:
+                        remux_detail += f" {stderr[-_DOWNLOAD_STDERR_TAIL:]}"
                     self._download_error(
                         handler,
                         "The camera returned no data for that range.",
-                        "The playback stream could not be remuxed from the camera.",
+                        remux_detail,
                         retry_href=retry_href,
                         code=502,
                     )
@@ -1250,8 +1272,10 @@ class ViewerApp:
                 handler.send_header("Cache-Control", "no-store")
                 handler.send_header("Connection", "close")
                 handler.end_headers()
-                handler.wfile.write(first)
+                handler.wfile.write(bytes(held))
                 for chunk in chunks:
+                    if not chunk:
+                        continue
                     handler.wfile.write(chunk)
                     streams.touch_download(key)
             except BrokenPipeError, ConnectionResetError, TimeoutError:

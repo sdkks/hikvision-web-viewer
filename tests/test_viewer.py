@@ -1316,6 +1316,20 @@ class DownloadSniffTests(unittest.TestCase):
         )
 
 
+def _mp4_box(box_type: bytes, payload: bytes = b"") -> bytes:
+    """One ISO base media box: 4-byte big-endian size, 4-byte type, payload."""
+    return (len(payload) + 8).to_bytes(4, "big") + box_type + payload
+
+
+# A fragmented-MP4 init segment (ftyp+moov, what empty_moov writes before any
+# frame) and the first media fragment (moof+mdat). A fallback reply is only a
+# real download once the media fragment exists: see has_media_fragment.
+FMP4_INIT = _mp4_box(b"ftyp", b"mp42\x00\x00\x00\x00mp42isom") + _mp4_box(
+    b"moov", _mp4_box(b"mvex")
+)
+FMP4_MEDIA = _mp4_box(b"moof", b"\x00" * 12) + _mp4_box(b"mdat", bytes(range(16)))
+
+
 class DownloadRouteTests(unittest.TestCase):
     """route_download relays the camera stream and stays typed on failure."""
 
@@ -1600,7 +1614,7 @@ class DownloadRouteTests(unittest.TestCase):
                 app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
             )
         )
-        body = b"\x00\x00\x00\x18ftypmp42" + bytes(range(32))
+        body = FMP4_INIT + FMP4_MEDIA
         stop = self._stub_fallback([body])
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
@@ -1620,7 +1634,7 @@ class DownloadRouteTests(unittest.TestCase):
         self.enterContext(
             mock.patch.object(app.cam, "download_stream", lambda uri: self._FakeDownload([]))
         )
-        stop = self._stub_fallback([b"\x00\x00\x00\x18ftypmp42" + bytes(range(16))])
+        stop = self._stub_fallback([FMP4_INIT + FMP4_MEDIA])
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 200)
@@ -1655,6 +1669,76 @@ class DownloadRouteTests(unittest.TestCase):
         app.route_download(handler, self.WINDOW)
         self.assertEqual(handler.status, 502)
         self.assertIn("refused the viewer", handler.wfile.getvalue().decode())
+
+    def test_fallback_holds_until_media_then_relays_in_order(self) -> None:
+        # empty_moov writes the init segment before any frame, so the relay must
+        # not answer 200 until a moof fragment exists -- and then must send every
+        # held byte, in order, exactly once.
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        tail = b"\x01\x02\x03\x04"
+        stop = self._stub_fallback([FMP4_INIT, FMP4_MEDIA, tail])
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.wfile.getvalue(), FMP4_INIT + FMP4_MEDIA + tail)
+        self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
+        stop.assert_called_once_with(self.SESSION_KEY)
+
+    def test_fallback_init_only_without_media_is_a_typed_card(self) -> None:
+        # The measured device failure: 200 with an init-only fragmented MP4 and no
+        # media in it. It must be the typed card (never a 200 attachment), and
+        # ffmpeg's own stderr must be in the detail.
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        stop = self._stub_fallback([FMP4_INIT], stderr="[rtsp @ 0x1] Could not read from resource.")
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 502)
+        self.assertNotEqual(handler.status, 200)
+        body = handler.wfile.getvalue().decode()
+        self.assertIn("no data", body)
+        self.assertIn("Could not read from resource", body)
+        self.assertNotIn("Content-Disposition", handler.response_headers)
+        stop.assert_called_once_with(self.SESSION_KEY)
+
+    def test_fallback_encoder_failure_without_media_is_a_typed_card(self) -> None:
+        # ffmpeg exits non-zero having produced nothing: the card names its stderr
+        # rather than answering 200 with an empty attachment.
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        self._stub_fallback([], stderr="rtsp: 500 Internal Server Error")
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 502)
+        self.assertIn("500 Internal Server Error", handler.wfile.getvalue().decode())
+
+    def test_a_stray_moof_inside_another_box_is_not_media(self) -> None:
+        # The detector walks the box chain; bytes spelling "moof" inside another
+        # box's payload must not pass for a media fragment.
+        decoy = _mp4_box(b"ftyp", b"mp42") + _mp4_box(b"moov", b"moof" + b"\x00" * 8)
+        app = self._app()
+        self.enterContext(
+            mock.patch.object(
+                app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
+            )
+        )
+        self._stub_fallback([decoy])
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 502)
 
     def test_running_playback_refuses_the_fallback(self) -> None:
         # The playback track is the camera's single playback session: a running
@@ -1695,11 +1779,35 @@ class DownloadRouteTests(unittest.TestCase):
                 app.cam, "download_stream", side_effect=camera.ServiceDownError("400")
             )
         )
-        stop = self._stub_fallback([b"\x00\x00\x00\x18ftypmp42" + bytes(range(8))])
+        stop = self._stub_fallback([FMP4_INIT + FMP4_MEDIA])
         handler = _FakeBodyHandler({})
         handler.wfile = cast("io.BytesIO", _BrokenWFile())
         app.route_download(handler, self.WINDOW)
         stop.assert_called_once_with(self.SESSION_KEY)
+
+
+class MediaFragmentTests(unittest.TestCase):
+    """has_media_fragment keys on a moof box, not on the first bytes."""
+
+    def test_init_only_is_not_media(self) -> None:
+        self.assertFalse(streams.has_media_fragment(FMP4_INIT))
+
+    def test_init_then_fragment_is_media(self) -> None:
+        self.assertTrue(streams.has_media_fragment(FMP4_INIT + FMP4_MEDIA))
+
+    def test_partial_box_header_at_the_end_is_not_media(self) -> None:
+        self.assertFalse(streams.has_media_fragment(FMP4_INIT + b"\x00\x00\x00\x10mo"))
+
+    def test_a_truncated_moof_payload_is_not_media(self) -> None:
+        # The header names a moof and its declared size, but the payload has not
+        # all arrived: that is a box still being written, not media yet.
+        self.assertFalse(streams.has_media_fragment(FMP4_INIT + FMP4_MEDIA[:12]))
+
+    def test_a_moof_in_another_payload_is_not_media(self) -> None:
+        self.assertFalse(streams.has_media_fragment(_mp4_box(b"moov", b"moof" + b"\x00" * 8)))
+
+    def test_accepts_a_bytearray(self) -> None:
+        self.assertTrue(streams.has_media_fragment(bytearray(FMP4_INIT + FMP4_MEDIA)))
 
 
 class DownloadCommandTests(unittest.TestCase):
