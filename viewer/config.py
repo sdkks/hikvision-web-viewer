@@ -16,6 +16,7 @@ CAM_PASS = os.environ.get("HIK_PASSWORD", "")
 RTSP_PORT = _int("HIK_RTSP_PORT", 554)
 HTTP_PORT = _int("HIK_HTTP_PORT", 80)
 MOCK = os.environ.get("HIK_MOCK", "") == "1"
+DEFAULT_CHANNEL = os.environ.get("VIEWER_DEFAULT_CHANNEL", "101")
 BIND_HOST = os.environ.get("VIEWER_BIND", "127.0.0.1")
 BIND_PORT = _int("VIEWER_PORT", 8756)
 CAM_BASE = f"http://{CAM_HOST}:{HTTP_PORT}"

@@ -55,6 +55,20 @@ snapshot stills (the UI says so). Still-image links work everywhere, JavaScript 
 - Recording search is served by the camera's app layer, which on some firmware is unreliable —
   the UI names that state instead of pretending it is "no clips".
 
+## Run with podman (NAS / always-on box)
+
+```bash
+cp config.env.example config.env   # edit: camera address + credentials
+podman build -f Containerfile -t hikvision-web-viewer .
+podman run -d --name camera-viewer -p 8756:8756 --env-file config.env hikvision-web-viewer
+# or: podman-compose up -d --build   (reads compose.yaml + config.env)
+```
+
+Resource notes: the HEVC→H.264 transcode costs CPU **only while a stream is
+actually being watched** — the page stops its session when the tab is hidden or
+closed, and idle sessions are reaped automatically. On a weak NAS CPU, set
+`VIEWER_DEFAULT_CHANNEL=102` to make the 360p sub channel the default live view.
+
 ## Development
 
 ```bash

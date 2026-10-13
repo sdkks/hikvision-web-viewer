@@ -9,6 +9,41 @@
 
   var current = { hls: null, video: null, timer: null, attempts: 0, bufferedOnce: false, t0: null };
   var renderStatus = function () {};
+  var pageKind = null;          // "live" | "play"
+  var pageChannel = "101";
+
+  function stopServerSession() {
+    const stopUrl = pageKind === "play" ? "/hls-play-stop" : "/hls-live-stop?ch=" + pageChannel;
+    try { navigator.sendBeacon(stopUrl); } catch (e) {
+      fetch(stopUrl, { method: "POST", keepalive: true }).catch(function () {});
+    }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (!pageKind) return;
+    const v = document.getElementById(pageKind === "play" ? "clip-video" : "live-video");
+    if (!v) return;
+    if (document.hidden) {
+      // nobody can see it: stop serving this session entirely
+      destroyStream();
+      setStatus("warn", "Paused — tab in background. Return to resume.");
+      stopServerSession();
+      v.dataset.resumePending = "1";
+    } else if (v.dataset.resumePending === "1") {
+      delete v.dataset.resumePending;
+      restartCurrent(v);
+    }
+  });
+
+  window.addEventListener("pagehide", stopServerSession);
+
+  function restartCurrent(video) {
+    if (pageKind === "play") {
+      initPlayback(video);
+    } else {
+      initLive(video);
+    }
+  }
 
   function setStatus(kind, text) { renderStatus(kind, text); }
 
@@ -135,6 +170,8 @@
   /* ── live page ────────────────────────────────────────────────── */
 
   function initLive(video) {
+    pageKind = "live";
+    pageChannel = video.dataset.channel || "101";
     renderStatus = function (kind, text) {
       var line = document.getElementById("status-line");
       if (!line) return;
@@ -184,6 +221,8 @@
   /* ── playback page ────────────────────────────────────────────── */
 
   function initPlayback(video) {
+    pageKind = "play";
+    pageChannel = video.dataset.channel || "101";
     renderStatus = function (kind, text) {
       var line = document.getElementById("status-line");
       if (!line) return;

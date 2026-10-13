@@ -283,6 +283,30 @@ def ensure_play(from_cam: str, to_cam: str) -> dict:
         return session
 
 
+def stop_play() -> bool:
+    """Stop the (single) playback session."""
+    stopped = False
+    with _sessions_lock:
+        for key in [k for k in _sessions if k.startswith("play-")]:
+            session = _sessions.pop(key)
+            _kill(session)
+            shutil.rmtree(session["dir"], ignore_errors=True)
+            stopped = True
+    return stopped
+
+
+def stop_key(kind: str, ident: str) -> bool:
+    """Stop a session on explicit request (viewer gone / tab hidden)."""
+    key = live_key(ident) if kind == "live" else play_key(ident, ident)
+    with _sessions_lock:
+        session = _sessions.pop(key, None)
+    if not session:
+        return False
+    _kill(session)
+    shutil.rmtree(session["dir"], ignore_errors=True)
+    return True
+
+
 def get_session(key: str) -> dict | None:
     """Touch and return a session if it is still alive."""
     with _sessions_lock:

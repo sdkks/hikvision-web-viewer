@@ -61,7 +61,8 @@ class ViewerApp:
 
     # ── pages ────────────────────────────────────────────────────────
     def page_live(self, handler):
-        content = templates.LIVE.replace("$channel", "101")
+        channel = config.DEFAULT_CHANNEL if config.DEFAULT_CHANNEL in CHANNELS else "101"
+        content = templates.LIVE.replace("$channel", channel)
         content = content.replace("$p_main", "true").replace("$p_sub", "false")
         # Codec hint: the mock encodes H.264; the real camera's main channel is H.265.
         content = content.replace("$codec_set", "avc" if config.MOCK else "hevc")
@@ -360,6 +361,20 @@ class ViewerApp:
         handler.end_headers()
         handler.wfile.write(data)
 
+    def route_hls_stop(self, handler, path: str, query: dict):
+        """Explicit stop: the viewer says nobody is watching (tab hidden/closed)."""
+        if path == "/hls-live-stop":
+            channel = query.get("ch", ["101"])[0] or "101"
+            stopped = streams.stop_key("live", channel)
+        else:
+            stopped = streams.stop_play()
+        body = b'{"stopped": ' + (b"true" if stopped else b"false") + b"}"
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
     def route_hls(self, handler, path: str, query: dict):
         # /hls/<key>/index.m3u8  |  /hls/media/<key>/<segment>
         parts = [p for p in path.split("/") if p][1:]  # drop 'hls'
@@ -430,6 +445,8 @@ class ViewerApp:
             return self.page_play(handler, query)
         if path.startswith("/hls/"):
             return self.route_hls(handler, path, query)
+        if path in ("/hls-live-stop", "/hls-play-stop"):
+            return self.route_hls_stop(handler, path, query)
         if path == "/download":
             return self.route_download(handler, query)
         if path == "/snapshot":
