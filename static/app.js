@@ -375,26 +375,39 @@
 
     function renderDay(payload) {
       grid.textContent = "";
-      const clips = payload.hour_clips.reduce((a, b) => a + b, 0);
+      // Count each recording once: per-hour counts would double a clip that
+      // crosses an hour boundary.
+      const clips = (payload.ranges || []).reduce((total, r) => total + r.clips, 0);
       const unknown = coverageUnknown(payload);
       dayHeading.textContent = unknown
         ? dayLabel(payload.date)
         : `${dayLabel(payload.date)} · ${clips} clip${clips === 1 ? "" : "s"}`;
 
+      const retryBtn = document.getElementById("picker-retry");
       if (unknown) {
         const messages = {
-          service_down: "The camera's search service isn't responding (known to be flaky). Live view still works — try again.",
+          service_down: "The camera's search service isn't responding (known to be flaky). Live view and clip playback still work.",
           unreachable: "Camera unreachable.",
           bad_response: "Unexpected search reply (possible firmware drift). Live view still works.",
         };
-        setStatus("warn", messages[payload.state] || "Couldn't check this day.");
+        const detail = payload.state_detail
+          ? ` (${String(payload.state_detail).slice(0, 120)})`
+          : "";
+        setStatus("warn", (messages[payload.state] || "Couldn't check this day.") + detail);
+        if (retryBtn) {
+          retryBtn.hidden = false;
+          retryBtn.textContent = "Retry this day";
+        }
       } else if (payload.state === "empty") {
         setStatus("", `No recordings on ${dayLabel(payload.date)}.`);
       } else if (payload.state === "truncated") {
         setStatus("warn", "This day has more clips than one query returns — coverage may be incomplete.");
       } else {
         setStatus("ok", `Checked ${dayLabel(payload.date)}.`);
+        if (retryBtn) retryBtn.hidden = true;
       }
+      const idleHint = document.getElementById("idle-hint");
+      if (idleHint) idleHint.hidden = true;
 
       const now = new Date();
       const isToday = isoDate(now) === payload.date;
@@ -574,6 +587,15 @@
     function epochOf(minute) {
       const dayStart = new Date(`${state.coverage.date}T00:00:00`).getTime() / 1000;
       return dayStart + state.hour * 3600 + minute * 60;
+    }
+
+    const retryControl = document.getElementById("picker-retry");
+    if (retryControl) {
+      retryControl.addEventListener("click", () => {
+        if (!state.date) return;
+        cache.delete(state.date); // failed days are never cached, but be explicit
+        loadDay(state.date, { push: true });
+      });
     }
 
     dateInput.addEventListener("change", () => {

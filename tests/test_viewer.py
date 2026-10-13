@@ -197,6 +197,28 @@ class StorageParseTests(unittest.TestCase):
             camera.parse_storage_response("<html>login required</html>")
 
 
+class ErrorClassifyTests(unittest.TestCase):
+    """A connect failure is 'unreachable'; a slow but connected reply is a service problem."""
+
+    def test_connect_timeout_is_unreachable(self):
+        import requests
+
+        exc = requests.exceptions.ConnectTimeout("connect timeout")
+        self.assertIsInstance(camera._classify_requests_error(exc), camera.UnreachableError)
+
+    def test_connection_error_is_unreachable(self):
+        import requests
+
+        exc = requests.exceptions.ConnectionError("no route")
+        self.assertIsInstance(camera._classify_requests_error(exc), camera.UnreachableError)
+
+    def test_read_timeout_is_service_down(self):
+        import requests
+
+        exc = requests.exceptions.ReadTimeout("server too slow")
+        self.assertIsInstance(camera._classify_requests_error(exc), camera.ServiceDownError)
+
+
 class OrphanCleanupTests(unittest.TestCase):
     def test_missing_pkill_does_not_raise(self):
         """Minimal container images have no pkill; session start must survive."""

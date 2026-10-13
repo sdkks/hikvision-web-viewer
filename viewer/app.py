@@ -139,7 +139,8 @@ class ViewerApp:
                 )
 
         results = (
-            "<p class='muted'>Choose a range to search. Recordings are motion-triggered clips.</p>"
+            "<p class='muted' id='idle-hint'>Choose a range to search, or pick a day "
+            "below to browse what is available. Recordings are motion-triggered clips.</p>"
         )
         code = 200
         if "searched" in query or frm_raw or preset:
@@ -439,12 +440,14 @@ class ViewerApp:
             clips = self.cam.search(
                 util.iso_search_time(day_start), util.iso_search_time(day_end), max_results=200
             )
-        except camera.ServiceDownError as exc:
-            payload.update(state="service_down", state_detail=str(exc))
-        except camera.UnreachableError as exc:
-            payload.update(state="unreachable", state_detail=str(exc))
-        except camera.BadResponseError as exc:
-            payload.update(state="bad_response", state_detail=str(exc))
+        except camera.ServiceDownError:
+            payload.update(
+                state="service_down", state_detail="the camera did not answer the search request"
+            )
+        except camera.UnreachableError:
+            payload.update(state="unreachable", state_detail=f"no route to {config.CAM_HOST}")
+        except camera.BadResponseError:
+            payload.update(state="bad_response", state_detail="reply was not the expected XML")
         else:
             if len(clips) >= 200:
                 payload["state"] = "truncated"

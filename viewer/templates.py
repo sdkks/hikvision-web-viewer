@@ -70,6 +70,7 @@ RECORDINGS = """<h1>Recordings</h1>
 </div>
 <div class="chips" id="recent-days" aria-label="Recent days"></div>
 <p id="picker-status" class="status" role="status"><span class="dot"></span><span class="label"></span></p>
+<p><button type="button" id="picker-retry" class="retry" hidden>Retry this day</button></p>
 <section id="day-view" hidden>
 <h3 id="day-heading" tabindex="-1"></h3>
 <p class="legend" aria-hidden="false">
@@ -84,7 +85,7 @@ RECORDINGS = """<h1>Recordings</h1>
 <h3 id="hour-heading" tabindex="-1"></h3>
 <div class="scrubwrap">
 <p id="scrub-readout" class="muted"></p>
-<input type="range" id="scrubber" min="0" max="59" step="1" value="0" aria-label="Minute of the hour">
+<input type="range" id="scrubber" min="0" max="59" step="1" value="0" aria-label="Minute of the hour" aria-describedby="scrub-readout">
 </div>
 <div class="ranges" id="range-rows"></div>
 <div class="playbar" id="play-bar" hidden>

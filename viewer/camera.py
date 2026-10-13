@@ -59,10 +59,14 @@ class Clip:
 
 
 def _classify_requests_error(exc: Exception) -> CameraError:
+    # Connect failures (including ConnectTimeout) mean the host/port is not
+    # reachable; a slow-but-connected reply is a service problem.
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return UnreachableError(f"cannot connect to the camera: {exc}")
     if isinstance(exc, requests.exceptions.Timeout):
-        return ServiceDownError(f"timeout talking to the camera: {exc}")
+        return ServiceDownError(f"camera did not answer in time: {exc}")
     if isinstance(exc, requests.exceptions.RequestException):
-        return UnreachableError(f"camera unreachable: {exc}")
+        return UnreachableError(f"camera request failed: {exc}")
     return CameraError(str(exc))
 
 
