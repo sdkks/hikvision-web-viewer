@@ -135,8 +135,8 @@ and deep-links as `?date=&hour=&min=` (browser Back steps up a level).
 
 ### 5. Secrets stay out of the repo
 
-Camera credentials and viewer auth live only in `config.env` (gitignored) or
-environment variables. `gitleaks` runs in pre-commit and will fail the commit.
+Camera credentials and viewer auth live only in `config.env`, the `VIEWER_CONFIG` JSON file
+(both gitignored), or environment variables. `gitleaks` runs in pre-commit and will fail the commit.
 Never hardcode credentials in source, tests, docs, or compose files.
 
 ### 6. The motion write is the only mutating endpoint
@@ -171,7 +171,8 @@ the app does not. Keep all five when touching it:
 
 ## Configuration
 
-All configuration is environment-based (`viewer/config.py`):
+Configuration is environment-based (`viewer/config.py`), with an optional JSON camera file
+named by `VIEWER_CONFIG` (`viewer/config_file.py`; format in `config.env.example`):
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -182,9 +183,19 @@ All configuration is environment-based (`viewer/config.py`):
 | `VIEWER_BIND` / `VIEWER_PORT` | `127.0.0.1` / `8756` | Server bind address |
 | `VIEWER_DEFAULT_CHANNEL` | `101` | Default live channel (`102` on weak CPUs) |
 | `VIEWER_AUTH_USER` / `VIEWER_AUTH_PASSWORD` | empty | When both set, HTTP Basic Auth is required for everything |
+| `VIEWER_CONFIG` | unset | Path to a JSON camera file; the file wins for the fields it sets, `HIK_*` fills the rest |
 | `VIEWER_ALLOWED_HOSTS` | empty | Extra host names accepted in the `Host` header (comma-separated, ports ignored) |
 
 `config.env.example` documents the format; `config.env` is the local copy.
+
+The JSON file holds one `camera` object (or a one-entry `cameras` array) and is authoritative
+for the fields it sets; `HIK_*` fills the rest and a startup note reports any disagreement
+(passwords never echoed). A missing, unreadable, malformed or invalid file stops startup with
+a message naming the path and the problem; unknown keys are rejected. `tls` selects the ISAPI
+scheme and `rtsp_tls` the RTSP scheme, with `rtsp_tls` defaulting to `tls`; `tls_verify` is
+shared and defaults to false for the camera's self-signed certificate. This camera serves
+HTTPS but not RTSPS, so `tls: true` with `rtsp_tls: false` is the combination that works
+there. `camera.json` is gitignored.
 
 ---
 

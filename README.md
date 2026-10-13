@@ -68,8 +68,43 @@ No camera at hand? `HIK_MOCK=1 .venv/bin/python -m viewer.app` runs against buil
 | `VIEWER_AUTH_USER` / `VIEWER_AUTH_PASSWORD` | empty | When both are set, HTTP Basic Auth is required for the whole viewer |
 | `VIEWER_ALLOWED_HOSTS` | empty | Extra host names accepted in the `Host` header (comma-separated, ports ignored) — see below |
 | `TZ` | host | Display timezone. Containers default to UTC — set it (e.g. `Asia/Singapore`) or all times and day boundaries shift |
+| `VIEWER_CONFIG` | unset | Path to a JSON camera file (below). The file wins for the fields it sets; `HIK_*` fills the rest |
 
-Credentials are read from the environment only — never committed. `config.env` is gitignored.
+Credentials come from the environment or the `VIEWER_CONFIG` file — never committed.
+`config.env` and `camera.json` are gitignored.
+
+### Camera config file (`VIEWER_CONFIG`)
+
+Instead of a wall of `-e` flags, mount one JSON file read-only and point `VIEWER_CONFIG`
+at it. It describes a single camera, and the password in it is plaintext, like `config.env`.
+
+```json
+{"camera": {"host": "192.168.0.156", "http_port": 80, "rtsp_port": 554,
+            "user": "admin", "password": "change-me",
+            "tls": false, "rtsp_tls": false, "tls_verify": false}}
+```
+
+```bash
+VIEWER_CONFIG=/config/camera.json      # podman: -v ./camera.json:/config/camera.json:ro
+```
+
+The file wins for the fields it sets and `HIK_*` fills the rest; a disagreement is reported
+once at startup (passwords never echoed), so the effective configuration is never a guess.
+A missing, unreadable, malformed or invalid file — or an unknown key, such as a typo'd
+`usr` — stops startup with a message naming the path and the problem, before a port is
+bound. The viewer never starts from defaults because the file was broken.
+
+`tls` picks the ISAPI scheme (`http`/`https`) and `rtsp_tls` picks the RTSP scheme
+(`rtsp`/`rtsps`); **`rtsp_tls` defaults to `tls`**, so an existing file keeps behaving exactly
+as it did. `tls_verify` is shared by both and defaults to `false`, because the camera ships a
+self-signed certificate — that buys confidentiality against a passive observer, not proof of
+who answered. Set it to `true` once the camera presents a certificate you can verify.
+
+On this camera HTTPS is served on 443 but **RTSPS is absent** (port 322 refuses, and 554
+does not answer RTSP-over-TLS), so `"tls": true` on its own would secure the settings calls
+and break live view and playback. Use `"tls": true, "rtsp_tls": false` there: HTTPS for
+search, snapshots and the motion editor, plain RTSP for streaming. That combination is
+verified working on this model.
 
 ### Viewer authentication (optional)
 
