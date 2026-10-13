@@ -14,7 +14,8 @@ vendor cloud or app**:
 
 - **Live view** — main/sub channel, streamed as HLS (fragmented TS) to the browser
 - **Recordings** — ISAPI search over the SD card, in-browser playback, clip download
-- **Downloads** — full clips over HTTP via ISAPI's `ContentMgmt/download` (~4x realtime)
+- **Downloads** — full clips over HTTP via ISAPI's `ContentMgmt/download` (~4x realtime), offered
+  from the picker and from the player
 - **Motion zones** — read/paint the camera's motion-detection grid (18x22) over a still,
   set sensitivity, toggle detection, apply with a readback
 - No cloud dependency, no accounts, LAN-only by default

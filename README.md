@@ -21,7 +21,9 @@ Shows live view and recorded clips in the browser, honest about what the camera 
   state), so you can see where video exists. Drag or tap to preview, then **Restart here** to begin a
   new session from that time; browser Back returns you to where you were. It is deliberately not a
   seek — the camera plays linearly and cannot seek inside a session, and it starts at the nearest
-  keyframe before the time you pick (a few seconds earlier).
+  keyframe before the time you pick (a few seconds earlier). The player also offers a
+  **Download original recording** link for the clip's own window: the camera's entire stored file,
+  not an export trimmed to that window.
 - **Jump between clips** — the player lists the five earlier and five later recordings, each labelled
   with the gap a jump would skip (so a jump across missing time never looks continuous), and can
   chain to the next recording automatically. That auto-advance is opt-in, counted down visibly, and
