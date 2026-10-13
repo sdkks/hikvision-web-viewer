@@ -461,6 +461,45 @@ class ViewerApp:
                 payload["state"] = "empty"
         self.send_json(handler, payload)
 
+    def route_neighbours(self, handler, query: dict):
+        """Recordings before/after the clip being watched (nearest first)."""
+        from_cam = (query.get("from", [""])[0] or "").strip()
+        to_cam = (query.get("to", [""])[0] or "").strip()
+        if not (util._CAM_RE.match(from_cam) and util._CAM_RE.match(to_cam)):
+            self.send_json(handler, {"state": "bad_request"}, 400)
+            return
+        start = util.parse_cam_time(from_cam)
+        end = util.parse_cam_time(to_cam)
+        day_start = start.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        payload = {
+            "state": "ok",
+            "state_detail": "",
+            "earlier": [],
+            "later": [],
+            "more_earlier": False,
+            "more_later": False,
+        }
+        try:
+            clips = self.cam.search(
+                util.iso_search_time(day_start),
+                util.iso_search_time(day_start + timedelta(days=1)),
+                max_results=200,
+            )
+        except camera.ServiceDownError:
+            payload.update(
+                state="service_down", state_detail="the camera did not answer the search request"
+            )
+        except camera.UnreachableError:
+            payload.update(state="unreachable", state_detail=f"no route to {config.CAM_HOST}")
+        except camera.BadResponseError:
+            payload.update(state="bad_response", state_detail="reply was not the expected XML")
+        else:
+            built = coverage.build_coverage(clips, day_start)
+            payload.update(
+                coverage.neighbours(built["files"], int(start.timestamp()), int(end.timestamp()))
+            )
+        self.send_json(handler, payload)
+
     def send_json(self, handler, payload: dict, code: int = 200):
         body = json.dumps(payload).encode()
         handler.send_response(code)
@@ -546,6 +585,8 @@ class ViewerApp:
             return self.route_hls_stop(handler, path, query)
         if path == "/api/coverage":
             return self.route_coverage(handler, query)
+        if path == "/api/neighbours":
+            return self.route_neighbours(handler, query)
         if path == "/download":
             return self.route_download(handler, query)
         if path == "/snapshot":

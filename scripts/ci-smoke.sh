@@ -46,6 +46,9 @@ if pgrep -x ffmpeg >/dev/null 2>&1; then
     exit 1
 fi
 
+echo "== neighbours API"
+curl -sf -m 10 "${BASE}/api/neighbours?from=20261012T194808Z&to=20261012T201036Z" | grep -q '"earlier"'
+
 echo "== coverage API and picker markup"
 curl -sf -m 10 "${BASE}/api/coverage?date=$(date +%F)" | grep -q '"state"'
 curl -sf -m 5 "${BASE}/recordings" | grep -q "hour-grid"

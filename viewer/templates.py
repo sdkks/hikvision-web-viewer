@@ -114,4 +114,12 @@ PLAY = Template("""<a class="back" href="/recordings">&larr; Results</a>
 <p id="counter" class="counter muted">00:00 / $dur_mmss</p>
 <div class="progresswrap" aria-hidden="true"><div id="progress" class="progress"></div></div>
 <div id="endnote" class="endnote" hidden></div>
+<section id="jumps" hidden>
+<h2>Nearby recordings</h2>
+<label class="autonext"><input type="checkbox" id="auto-next"> Play the next recording automatically</label>
+<div class="jumpcols">
+<div><h3>Earlier</h3><ul class="jumps" id="earlier"></ul></div>
+<div><h3>Later</h3><ul class="jumps" id="later"></ul></div>
+</div>
+</section>
 """)

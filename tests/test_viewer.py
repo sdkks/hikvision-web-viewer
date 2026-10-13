@@ -166,6 +166,37 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(coverage._level(60), 4)
 
 
+class NeighbourTests(unittest.TestCase):
+    """Neighbour navigation must report the gap a jump would skip."""
+
+    def _file(self, start, end, name="f"):
+        return {
+            "start_epoch": start,
+            "end_epoch": end,
+            "dur_s": end - start,
+            "size": 1,
+            "name": name,
+            "start_local": "",
+            "end_local": "",
+        }
+
+    def test_earlier_later_and_gaps(self):
+        files = [self._file(0, 100), self._file(160, 260), self._file(1000, 1100)]
+        out = coverage.neighbours(files, current_from=160, current_to=260)
+        self.assertEqual([f["start_epoch"] for f in out["earlier"]], [0])
+        self.assertEqual(out["earlier"][0]["gap_s"], 60)  # 100 -> 160 is empty
+        self.assertEqual([f["start_epoch"] for f in out["later"]], [1000])
+        self.assertEqual(out["later"][0]["gap_s"], 740)  # 260 -> 1000 is empty
+        self.assertFalse(out["more_later"])
+
+    def test_limit_and_truncation_flags(self):
+        files = [self._file(i * 1000, i * 1000 + 100) for i in range(1, 9)]
+        out = coverage.neighbours(files, current_from=1000, current_to=1100, limit=2)
+        self.assertEqual(len(out["earlier"]), 0)
+        self.assertEqual(len(out["later"]), 2)
+        self.assertTrue(out["more_later"])
+
+
 class StorageParseTests(unittest.TestCase):
     """Real camera replies carry attributes and namespaces; parsing must survive."""
 

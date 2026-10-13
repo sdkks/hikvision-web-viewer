@@ -386,6 +386,28 @@ details.range summary { cursor: pointer; min-height: 44px; display: flex; align-
 .endnote.warn { border-color: var(--warn); }
 .endnote .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 
+/* ── neighbour jumps (playback page) ───────────────────────────── */
+#jumps { margin-top: 16px; }
+.autonext {
+  display: flex; align-items: center; gap: 8px; min-height: 44px;
+  color: var(--text); font-size: 14px; margin: 4px 0 10px;
+}
+.autonext input { width: 20px; height: 20px; }
+.jumpcols { display: grid; gap: 12px; }
+@media (min-width: 720px) { .jumpcols { grid-template-columns: 1fr 1fr; } }
+.jumpcols h3 { margin: 6px 0; font-size: 15px; }
+.jumps { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.jumps a {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;
+  min-height: 44px; padding: 8px 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+}
+.jumps a:hover { border-color: var(--accent); text-decoration: none; }
+.jumps .when { font-weight: 600; }
+.jumps .meta { color: var(--text-dim); font-size: 13px; }
+.jumps .gap { color: var(--warn); font-size: 13px; }
+.jumps .none { color: var(--text-dim); font-size: 14px; }
+
 /* ── footer ────────────────────────────────────────────────────── */
 .foot a { display: inline-flex; align-items: center; min-height: 44px; padding: 10px 0; }
 

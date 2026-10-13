@@ -27,6 +27,26 @@ def _level(covered_minutes: int, total_minutes: int = 60) -> int:
     return 3
 
 
+def neighbours(files: list[dict], current_from: int, current_to: int, limit: int = 5) -> dict:
+    """Recordings before/after the one being watched, nearest first.
+
+    Each entry carries `gap_s`: how much time is skipped when jumping there, so
+    a jump across a gap can never look continuous.
+    """
+    before = [f for f in files if f["end_epoch"] <= current_from]
+    after = [f for f in files if f["start_epoch"] >= current_to]
+    earlier = [
+        {**f, "gap_s": max(0, current_from - f["end_epoch"])} for f in reversed(before[-limit:])
+    ]
+    later = [{**f, "gap_s": max(0, f["start_epoch"] - current_to)} for f in after[:limit]]
+    return {
+        "earlier": earlier,
+        "later": later,
+        "more_earlier": len(before) > limit,
+        "more_later": len(after) > limit,
+    }
+
+
 def build_coverage(clips, day_start: datetime) -> dict:
     """Build the coverage map for one local day.
 

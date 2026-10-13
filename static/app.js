@@ -142,6 +142,151 @@
       "<a class='retry' style='display:inline-flex;align-items:center;text-decoration:none' " +
       "href='/recordings'>← Results</a></div>";
     note.hidden = false;
+    maybeAutoNext(note);
+  }
+
+  /* Optional chained playback: only when the viewer opted in, only when a next
+     recording exists, always visible and cancellable. */
+  var autoNextTimer = null;
+
+  function autoNextEnabled() {
+    try { return localStorage.getItem("autoNext") === "1"; } catch (e) { return false; }
+  }
+
+  function maybeAutoNext(note) {
+    if (!autoNextEnabled()) return;
+    var link = document.querySelector("#later a");
+    if (!link) return;
+    var seconds = 3;
+    var row = document.createElement("div");
+    row.className = "row";
+    note.append(row);
+    var render = function () {
+      var when = link.querySelector(".when").textContent.replace(/^[\u25c0\u25b6]\s*/, "");
+      row.innerHTML = "<a class='retry' href='" + link.getAttribute("href") + "'>Next in " +
+        seconds + "\u2026 \u25b6 " + when + "</a>";
+    };
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "copybtn";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", function () {
+      if (autoNextTimer) { clearInterval(autoNextTimer); autoNextTimer = null; }
+      row.textContent = "Auto-advance cancelled.";
+      cancel.remove();
+    });
+    render();
+    note.append(cancel);
+    autoNextTimer = setInterval(function () {
+      seconds -= 1;
+      if (seconds <= 0) {
+        clearInterval(autoNextTimer);
+        autoNextTimer = null;
+        window.location.href = link.getAttribute("href");
+        return;
+      }
+      render();
+    }, 1000);
+  }
+
+  /* Neighbour table under the player, with honest gap labels. */
+  function initNeighbours() {
+    var box = document.getElementById("jumps");
+    if (!box) return;
+
+    var check = document.getElementById("auto-next");
+    if (check) {
+      check.checked = autoNextEnabled();
+      check.addEventListener("change", function () {
+        try { localStorage.setItem("autoNext", check.checked ? "1" : "0"); } catch (e) { /* noop */ }
+      });
+    }
+
+    var params = new URLSearchParams(location.search);
+    var from = params.get("from");
+    var to = params.get("to");
+    if (!from || !to) return;
+
+    function load(attempt) {
+      fetch("/api/neighbours?from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to),
+            { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          box.hidden = false;
+          if (data.state !== "ok") {
+            // The camera's search is known to be flaky: name the reason, retry once,
+            // and always leave a way to ask again.
+            if (attempt === 0) { window.setTimeout(function () { load(1); }, 1500); return; }
+            showJumpProblem("Can\u2019t list other recordings (" +
+              (data.state_detail || data.state) + ").");
+            return;
+          }
+          renderJumpList("earlier", data.earlier, data.more_earlier, "earlier");
+          renderJumpList("later", data.later, data.more_later, "later");
+        })
+        .catch(function (err) {
+          box.hidden = false;
+          if (attempt === 0) { window.setTimeout(function () { load(1); }, 1500); return; }
+          showJumpProblem("Couldn\u2019t load nearby recordings (" + (err && err.message ? err.message : err) + ").");
+        });
+    }
+
+    function showJumpProblem(message) {
+      var earlier = document.getElementById("earlier");
+      earlier.innerHTML = "<li class='none'>" + message + "</li>";
+      document.getElementById("later").innerHTML = "";
+      var li = document.createElement("li");
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "copybtn";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", function () { load(1); });
+      li.append(btn);
+      earlier.append(li);
+    }
+
+    load(0);
+  }
+
+  function gapText(seconds) {
+    if (seconds < 60) return "";
+    var minutes = Math.round(seconds / 60);
+    return minutes >= 60
+      ? Math.floor(minutes / 60) + " h " + String(minutes % 60).padStart(2, "0") + " min gap"
+      : minutes + " min gap";
+  }
+
+  function renderJumpList(id, items, more, direction) {
+    var list = document.getElementById(id);
+    list.textContent = "";
+    if (!items.length) {
+      var none = document.createElement("li");
+      none.className = "none";
+      none.textContent = direction === "earlier"
+        ? "No earlier recordings today."
+        : "No later recordings today.";
+      list.append(none);
+      return;
+    }
+    for (var i = 0; i < items.length; i++) {
+      var f = items[i];
+      var gap = gapText(f.gap_s);
+      var li = document.createElement("li");
+      li.innerHTML =
+        "<a href='" + playHref(f.start_epoch, f.end_epoch, f.size) + "'>" +
+        "<span class='when'>" + (direction === "earlier" ? "\u25c0 " : "\u25b6 ") +
+        f.start_local + "</span>" +
+        "<span class='meta'>" + humanDuration(f.dur_s) + " \u00b7 " + humanSize(f.size) + "</span>" +
+        (gap ? "<span class='gap'>" + gap + "</span>" : "") +
+        "</a>";
+      list.append(li);
+    }
+    if (more) {
+      var moreLi = document.createElement("li");
+      moreLi.className = "none";
+      moreLi.textContent = "\u2026more " + direction + " recordings today (use Browse by time).";
+      list.append(moreLi);
+    }
   }
 
   /* ── HLS attach: hls.js everywhere; Safari native HLS as fallback ── */
@@ -330,6 +475,7 @@
   /* ── playback page ────────────────────────────────────────────── */
 
   function initPlayback(video) {
+    initNeighbours();
     pageKind = "play";
     pageChannel = video.dataset.channel || "101";
     renderStatus = function (kind, text) {
@@ -375,8 +521,6 @@
     const state = { date: null, hour: null, minute: null, coverage: null };
     const pad = (n) => String(n).padStart(2, "0");
     const isoDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const camTime = (epoch) =>
-      new Date(epoch * 1000).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
     const hhmm = (epoch) => {
       const d = new Date(epoch * 1000);
       return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -639,25 +783,8 @@
       return filesInDay().filter((f) => f.start_epoch < to && f.end_epoch > from);
     }
 
-    function humanDuration(seconds) {
-      const s = Math.max(0, Math.round(seconds));
-      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
-      if (h) return `${h} h ${pad(m)} min`;
-      if (m) return `${m} min ${pad(r)} s`;
-      return `${r} s`;
-    }
 
-    function humanSize(bytes) {
-      const units = ["B", "KB", "MB", "GB"];
-      let value = Math.max(0, bytes), i = 0;
-      while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
-      return `${i === 0 ? value : value.toFixed(1)} ${units[i]}`;
-    }
 
-    function playHref(fromEpoch, toEpoch, size) {
-      const dur = Math.max(1, toEpoch - fromEpoch);
-      return `/play?from=${camTime(fromEpoch)}&to=${camTime(toEpoch)}&dur=${dur}&size=${size}`;
-    }
 
     function containingRange(epoch) {
       // Overlap by minute: the selected minute is covered when any part of it
@@ -757,6 +884,33 @@
     dateInput.value = isoDate(new Date());
     renderChips();
     applyUrl({ focus: false });
+  }
+
+  /* Shared formatting/jump helpers (used by the picker and the player). */
+  function humanDuration(seconds) {
+    var s = Math.max(0, Math.round(seconds));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    if (h) return h + " h " + String(m).padStart(2, "0") + " min";
+    if (m) return m + " min " + String(r).padStart(2, "0") + " s";
+    return r + " s";
+  }
+
+  function humanSize(bytes) {
+    var units = ["B", "KB", "MB", "GB"];
+    var value = Math.max(0, bytes), i = 0;
+    while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+    return (i === 0 ? value : value.toFixed(1)) + " " + units[i];
+  }
+
+  /* Camera time format: 20261013T080617Z (UTC, compact). */
+  function camTime(epoch) {
+    return new Date(epoch * 1000).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  }
+
+  function playHref(fromEpoch, toEpoch, size) {
+    var dur = Math.max(1, toEpoch - fromEpoch);
+    return "/play?from=" + camTime(fromEpoch) + "&to=" + camTime(toEpoch) +
+      "&dur=" + dur + "&size=" + (size || 0);
   }
 
   /* ── boot ─────────────────────────────────────────────────────── */
