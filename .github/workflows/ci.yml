@@ -30,22 +30,25 @@ jobs:
         with:
           python-version: "3.14"
 
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
       - name: Install python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt ruff
+        run: uv sync --frozen
 
       - name: Lint
-        run: ruff check .
+        run: uv run --frozen ruff check .
 
       - name: Format check
-        run: ruff format --check .
+        run: uv run --frozen ruff format --check .
 
       - name: Static type check
-        run: python -m mypy --config-file pyproject.toml
+        run: uv run --frozen python -m mypy --config-file pyproject.toml
 
       - name: Unit tests
-        run: python -B -m unittest discover -s tests -v
+        run: uv run --frozen python -B -m unittest discover -s tests -v
 
       - name: Install ffmpeg
         run: |
@@ -53,4 +56,4 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: Integration smoke (mock sessions, HLS segments, stop-on-demand)
-        run: bash scripts/ci-smoke.sh
+        run: uv run --frozen bash scripts/ci-smoke.sh

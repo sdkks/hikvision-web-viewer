@@ -1,5 +1,0 @@
-requests>=2.31
-# camera.py imports urllib3 directly (to suppress the insecure-request warning
-# when tls_verify is off), so name it here rather than relying on requests'
-# transitive pin. urllib3 2.x is what requests 2.31+ resolves to.
-urllib3>=2,<3

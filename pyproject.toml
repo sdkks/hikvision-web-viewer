@@ -1,3 +1,32 @@
+[project]
+name = "hikvision-web-viewer"
+version = "0.1.0"
+description = "Local, honest viewer for a Hikvision camera"
+requires-python = ">=3.14"
+dependencies = [
+    "requests>=2.31",
+    # camera.py imports urllib3 directly (to suppress the insecure-request warning
+    # when tls_verify is off), so name it here rather than relying on requests'
+    # transitive pin. urllib3 2.x is what requests 2.31+ resolves to.
+    "urllib3>=2,<3",
+]
+
+# Static-analysis / dev toolchain (the gate tools). Installed by `uv sync` into
+# .venv; never present in the runtime image. `uv.lock` is the single source of
+# truth for these versions.
+[dependency-groups]
+dev = [
+    "mypy==2.4.0",
+    "pre-commit==4.7.0",
+    "ruff==0.17.0",
+    "types-requests==2.33.0.20261006",
+]
+
+[tool.uv]
+# Application, not a distributable library: uv installs dependencies only and
+# never tries to build or install the project itself.
+package = false
+
 [tool.ruff]
 line-length = 100
 # Runtime requires Python 3.14+ (see README); ruff targets the same.

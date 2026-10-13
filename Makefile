@@ -17,7 +17,7 @@ setup:
 		if command -v brew >/dev/null 2>&1; then brew install direnv; \
 		else echo "direnv is required: https://direnv.net/docs/installation.html"; exit 1; fi; }
 	uv venv $(VENV) --python $(PYTHON_VERSION) --seed
-	uv pip install --python $(PY) -r requirements.txt -r requirements-dev.txt ruff pre-commit
+	UV_PROJECT_ENVIRONMENT=$(VENV) uv sync --frozen
 	$(VENV)/bin/pre-commit install
 	@echo ""
 	@echo "Setup complete."
