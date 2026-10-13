@@ -181,6 +181,11 @@ JavaScript or not.
   time, and it is hidden while playback is paused or stalled rather than showing a confident number;
   it can run a few seconds ahead of the picture, because the browser buffers behind the stream.
 - The camera allows **one** playback session; starting a new one takes over the old.
+- The camera also serves only a **small number of live streams at once**, so another client — a
+  phone app, an NVR, the camera's own web page — can take the stream a live view needs. The viewer
+  then reports the camera's own failure rather than pretending the camera or the recording is gone;
+  stopping the other client and retrying clears it. Watching *this* viewer from several browsers is
+  free, because they share one camera stream per channel.
 - **A download prefers the camera's own file, and never trims it.** `ContentMgmt/download` streams
   the stored recording that contains the point you asked for, in the camera's own container, at
   roughly 4x realtime; the camera does not cut it to the exact range, so a download can cover more
@@ -256,7 +261,9 @@ podman run -d --name camera-viewer -p 8756:8756 --env-file config.env hikvision-
 
 Resource notes: the HEVC→H.264 transcode costs CPU **only while a stream is
 actually being watched** — the page stops its session when the tab is hidden or
-closed, and idle sessions are reaped automatically. On a weak NAS CPU, set
+closed, and idle sessions are reaped automatically. One camera stream per channel
+is opened however many browsers are watching it, so opening the viewer elsewhere
+costs no extra camera session. On a weak NAS CPU, set
 `VIEWER_DEFAULT_CHANNEL=102` to make the 360p sub channel the default live view.
 
 ## Development

@@ -112,6 +112,16 @@ working. Use the error model:
 Never collapse "service down" into "no recordings" — distinguishing them *is*
 the feature. Streaming/snapshots are the reliable floor; offer them everywhere.
 
+**The camera serves a small number of concurrent streams.** In practice one live
+client and one playback client; a phone app, an NVR or the camera's own web page
+holding one of them makes the viewer's session fail. The owner reported this
+camera behaving that way (2026-10: live view and the download fallback returning no
+data while the camera was also being watched elsewhere), so rule contention out
+before blaming firmware. The viewer multiplexes — every browser shares one upstream
+stream per channel — so this only bites with an external client. **When a stream or
+download fails while something else is watching the camera, ask for the other client
+to stop, then retry; do not report it as a broken camera.**
+
 **A control that displays camera state must render an explicit unknown state
 until the camera has actually answered.** Never pre-paint a plausible-looking
 default: a viewer that shows an all-masked zone map before (or without) a
