@@ -1,5 +1,7 @@
-"""HTTP server: pages, ISAPI proxying, and ffmpeg-backed fMP4 streaming."""
+"""HTTP server: pages, ISAPI proxying, and ffmpeg-backed HLS streaming."""
 
+import base64
+import hmac
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -11,6 +13,27 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 STATIC_TYPES = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml"}
 
 CHANNELS = ("101", "102")
+
+
+def auth_required() -> bool:
+    """Viewer-side protection is active only when both credentials are configured."""
+    return bool(config.AUTH_USER and config.AUTH_PASSWORD)
+
+
+def check_auth(header_value: str | None) -> bool:
+    """Validate an HTTP Basic Authorization header (constant-time compare)."""
+    if not auth_required():
+        return True
+    if not header_value or not header_value.lower().startswith("basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header_value.split(" ", 1)[1].strip(), validate=True)
+        user, _, password = decoded.decode("utf-8").partition(":")
+    except Exception:
+        return False
+    return hmac.compare_digest(user, config.AUTH_USER) and hmac.compare_digest(
+        password, config.AUTH_PASSWORD
+    )
 
 
 def esc(value: str) -> str:
@@ -445,6 +468,17 @@ class ViewerApp:
 
     # ── dispatch ─────────────────────────────────────────────────────
     def dispatch(self, handler):
+        if not check_auth(handler.headers.get("Authorization")):
+            body = b"Authentication required.\n"
+            handler.send_response(401)
+            handler.send_header(
+                "WWW-Authenticate", 'Basic realm="hikvision-web-viewer", charset="UTF-8"'
+            )
+            handler.send_header("Content-Type", "text/plain; charset=utf-8")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+            return
         parsed = urlparse(handler.path)
         path = parsed.path
         query = parse_qs(parsed.query, keep_blank_values=True)

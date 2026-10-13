@@ -39,8 +39,17 @@ No camera at hand? `HIK_MOCK=1 venv/bin/python -m viewer.app` runs against built
 | `HIK_RTSP_PORT` / `HIK_HTTP_PORT` | `554` / `80` | Camera service ports |
 | `HIK_MOCK` | unset | `1` = built-in fixtures, no device needed |
 | `VIEWER_BIND` / `VIEWER_PORT` | `127.0.0.1` / `8756` | Server bind address |
+| `VIEWER_AUTH_USER` / `VIEWER_AUTH_PASSWORD` | empty | When both are set, HTTP Basic Auth is required for the whole viewer |
 
 Credentials are read from the environment only — never committed. `config.env` is gitignored.
+
+### Viewer authentication (optional)
+
+Set `VIEWER_AUTH_USER` and `VIEWER_AUTH_PASSWORD` and the viewer answers `401`
+until credentials are supplied, so `http://user:pass@host:8756/` works in a
+browser (or any HTTP client with Basic Auth). Basic Auth sends credentials in
+plaintext over HTTP — put a TLS-terminating reverse proxy in front if the tool
+is exposed beyond a trusted LAN.
 
 ## Codec handling (H.264, H.265/HEVC, H.265+)
 

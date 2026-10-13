@@ -2,8 +2,10 @@
 
 import unittest
 from datetime import timezone
+from unittest import mock
 
-from viewer import camera, util
+from viewer import app as viewer_app
+from viewer import camera, config, util
 
 
 class TimeTests(unittest.TestCase):
@@ -101,6 +103,34 @@ class IsoToCamTests(unittest.TestCase):
 
     def test_garbage_returns_empty(self):
         self.assertEqual(camera._iso_to_cam("not-a-date"), "")
+
+
+class BasicAuthTests(unittest.TestCase):
+    """Viewer-side HTTP Basic Auth: active only when both env vars are set."""
+
+    def _with_auth(self, user, password):
+        return mock.patch.multiple(config, AUTH_USER=user, AUTH_PASSWORD=password)
+
+    def test_no_auth_configured_allows_anything(self):
+        with self._with_auth("", ""):
+            self.assertTrue(viewer_app.check_auth(None))
+            self.assertTrue(viewer_app.check_auth("Basic anything"))
+
+    def test_configured_requires_valid_credentials(self):
+        import base64
+
+        good = "Basic " + base64.b64encode(b"alice:s3cret").decode()
+        bad_pw = "Basic " + base64.b64encode(b"alice:wrong").decode()
+        bad_user = "Basic " + base64.b64encode(b"bob:s3cret").decode()
+        with self._with_auth("alice", "s3cret"):
+            self.assertFalse(viewer_app.check_auth(None))
+            self.assertFalse(viewer_app.check_auth(""))
+            self.assertFalse(viewer_app.check_auth("Bearer token"))
+            self.assertFalse(viewer_app.check_auth("Basic not-base64!!"))
+            self.assertFalse(viewer_app.check_auth(bad_pw))
+            self.assertFalse(viewer_app.check_auth(bad_user))
+            self.assertTrue(viewer_app.check_auth(good))
+            self.assertTrue(viewer_app.check_auth("basic " + good.split(" ", 1)[1]))
 
 
 if __name__ == "__main__":
