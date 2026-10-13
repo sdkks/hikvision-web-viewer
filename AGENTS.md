@@ -99,7 +99,7 @@ working. Use the error model:
 
 - `UnreachableError` -> "Camera unreachable at <host>"
 - `ServiceDownError` -> "search service isn't responding … live view still works"
-- `BadResponseError` -> unexpected reply (firmware drift)
+- `BadResponseError` -> unexpected reply (the camera returned something we did not expect)
 
 Never collapse "service down" into "no recordings" — distinguishing them *is*
 the feature. Streaming/snapshots are the reliable floor; offer them everywhere.
