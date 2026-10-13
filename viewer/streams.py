@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config
+from . import camera, config
 
 HLS_ROOT = Path(tempfile.gettempdir()) / f"hikvision-viewer-hls-{config.BIND_PORT}"
 LIVE_IDLE_S = 90
@@ -391,7 +391,11 @@ def mock_snapshot_jpeg() -> bytes:
         timeout=15,
     )
     if out.returncode != 0 or not out.stdout.startswith(b"\xff\xd8"):
-        raise RuntimeError("mock snapshot generation failed")
+        stderr = (out.stderr or b"").decode("utf-8", "replace").strip()
+        raise camera.BadResponseError(
+            "mock snapshot generation failed "
+            f"(ffmpeg exit {out.returncode}): {stderr or 'ffmpeg produced no image'}"
+        )
     return out.stdout
 
 
@@ -429,6 +433,14 @@ class MockDownloadResponse:
             capture_output=True,
             timeout=60,
         )
+        # Mirror the snapshot path: a failed encoder is a failed reply, not an
+        # empty file. Never yield nothing and let the caller call that a 200.
+        if out.returncode != 0 or not out.stdout:
+            stderr = (out.stderr or b"").decode("utf-8", "replace").strip()
+            detail = stderr or "ffmpeg produced no output"
+            raise camera.BadResponseError(
+                f"mock download generation failed (ffmpeg exit {out.returncode}): {detail}"
+            )
         data = out.stdout
         for i in range(0, len(data), chunk_size):
             yield data[i : i + chunk_size]

@@ -2,12 +2,13 @@
 
 import io
 import json
+import subprocess
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from viewer import app as viewer_app
-from viewer import camera, config, coverage, motion, util
+from viewer import camera, config, coverage, motion, streams, util
 
 
 class TimeTests(unittest.TestCase):
@@ -1381,6 +1382,73 @@ class DownloadRouteTests(unittest.TestCase):
         handler = _FakeBodyHandler({})
         app.route_download(handler, self.WINDOW)
         self.assertTrue(fake.closed)
+
+    def test_mock_encoder_failure_raises_a_typed_error_with_stderr(self):
+        # A failed encoder is a failed reply, not an empty file: the generator
+        # names ffmpeg's stderr instead of silently yielding nothing.
+        failed = subprocess.CompletedProcess([], 1, b"", b"boom: no such filter")
+        with mock.patch.object(streams.subprocess, "run", return_value=failed):
+            with self.assertRaises(camera.BadResponseError) as ctx:
+                list(streams.MockDownloadResponse().iter_content(viewer_app.DOWNLOAD_CHUNK))
+        self.assertIn("boom: no such filter", str(ctx.exception))
+
+    def test_mock_snapshot_encoder_failure_raises_a_typed_error(self):
+        # Same rule as the download, and the reason it matters: route_snapshot
+        # only catches camera.CameraError, so a bare RuntimeError escaped as an
+        # unhandled 500 instead of the typed card the other failures get.
+        failed = subprocess.CompletedProcess([], 1, b"", b"snapshot boom")
+        with mock.patch.object(streams.subprocess, "run", return_value=failed):
+            with self.assertRaises(camera.BadResponseError) as ctx:
+                streams.mock_snapshot_jpeg()
+        self.assertIn("snapshot boom", str(ctx.exception))
+
+    def test_failed_mock_encoder_is_a_typed_error_not_an_empty_200(self):
+        # Drive the real mock response through the route: the download must not
+        # answer 200 with a 0-byte attachment, and the stderr must reach the card.
+        app = self._app()
+        failed = subprocess.CompletedProcess([], 1, b"", b"forced mock encoder failure")
+        with (
+            mock.patch.object(config, "MOCK", True),
+            mock.patch.object(streams.subprocess, "run", return_value=failed),
+        ):
+            handler = _FakeBodyHandler({})
+            app.route_download(handler, self.WINDOW)
+        body = handler.wfile.getvalue().decode()
+        self.assertEqual(handler.status, 502)
+        self.assertIn("no data", body)
+        self.assertIn("forced mock encoder failure", body)
+        self.assertIn("/download?from=20261012T194808Z", body)  # Retry affordance
+
+    def test_successful_mock_generation_still_relays_bytes(self):
+        # The happy path must survive the failure guard: bytes in, same bytes out.
+        app = self._app()
+        body = b"\x00\x00\x00\x18ftypmp42" + bytes(range(64))
+        ok = subprocess.CompletedProcess([], 0, body, b"")
+        with (
+            mock.patch.object(config, "MOCK", True),
+            mock.patch.object(streams.subprocess, "run", return_value=ok),
+        ):
+            handler = _FakeBodyHandler({})
+            app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.wfile.getvalue(), body)
+        self.assertEqual(handler.response_headers["Content-Type"], "video/mp4")
+        self.assertEqual(
+            handler.response_headers["Content-Disposition"],
+            'attachment; filename="clip_20261012T194808Z_20261012T201036Z.mp4"',
+        )
+
+    def test_empty_camera_reply_is_a_typed_error_not_an_empty_200(self):
+        # A real camera that answers 200 with no bytes is a bad reply, not a
+        # successful empty download. It must be typed and offer a Retry.
+        app = self._app()
+        app.cam.download_stream = lambda uri: self._FakeDownload([])
+        handler = _FakeBodyHandler({})
+        app.route_download(handler, self.WINDOW)
+        self.assertEqual(handler.status, 502)
+        body = handler.wfile.getvalue().decode()
+        self.assertIn("no data", body)
+        self.assertIn("/download?from=20261012T194808Z", body)
 
 
 if __name__ == "__main__":

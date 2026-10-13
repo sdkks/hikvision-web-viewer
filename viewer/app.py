@@ -1081,24 +1081,52 @@ class ViewerApp:
         # decide both the Content-Type and the extension. The first chunk is held
         # back and written after the headers, then the rest of the stream is
         # relayed unchanged -- the file is never buffered whole.
+        #
+        # A reply that yields no bytes at all (the mock encoder failing, or a real
+        # camera answering 200 with an empty file) is a bad reply, not a good
+        # empty download: catch it here, before any status is committed, and
+        # answer a typed error card instead of a successful-looking 0-byte file.
         try:
-            stream = response.iter_content(DOWNLOAD_CHUNK)
-            first = next((chunk for chunk in stream if chunk), b"")
+            try:
+                stream = response.iter_content(DOWNLOAD_CHUNK)
+                first = next((chunk for chunk in stream if chunk), b"")
+            except camera.BadResponseError as exc:
+                self._download_error(
+                    handler,
+                    "The camera returned no data for that range.",
+                    str(exc),
+                    retry_href=retry_href,
+                    code=502,
+                )
+                return
+            except BrokenPipeError, ConnectionResetError, TimeoutError:
+                return  # the browser cancelled or vanished mid-download; nothing to report
+
+            if not first:
+                self._download_error(
+                    handler,
+                    "The camera returned no data for that range.",
+                    "The download service answered but sent an empty file.",
+                    retry_href=retry_href,
+                    code=502,
+                )
+                return
+
             content_type, extension = sniff_download_container(first)
             filename = f"clip_{from_cam}_{to_cam}.{extension}"
-            handler.send_response(200)
-            handler.send_header("Content-Type", content_type)
-            handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-            handler.send_header("Cache-Control", "no-store")
-            handler.send_header("Connection", "close")
-            handler.end_headers()
-            if first:
+            try:
+                handler.send_response(200)
+                handler.send_header("Content-Type", content_type)
+                handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                handler.send_header("Cache-Control", "no-store")
+                handler.send_header("Connection", "close")
+                handler.end_headers()
                 handler.wfile.write(first)
-            for chunk in stream:
-                if chunk:
-                    handler.wfile.write(chunk)
-        except BrokenPipeError, ConnectionResetError, TimeoutError:
-            pass  # the browser cancelled or vanished mid-download; nothing to report
+                for chunk in stream:
+                    if chunk:
+                        handler.wfile.write(chunk)
+            except BrokenPipeError, ConnectionResetError, TimeoutError:
+                pass  # the browser cancelled or vanished mid-download; nothing to report
         finally:
             try:
                 response.close()
