@@ -83,6 +83,9 @@ Credentials come from the environment or the `VIEWER_CONFIG` file — never comm
 
 Instead of a wall of `-e` flags, mount one JSON file read-only and point `VIEWER_CONFIG`
 at it. It describes a single camera, and the password in it is plaintext, like `config.env`.
+A one-entry `cameras` array is accepted in place of the `camera` object, for a file written
+for several cameras; more than one entry is refused, and the message says so, because one
+instance serves one camera.
 
 ```json
 {"camera": {"host": "192.168.0.156", "http_port": 80, "rtsp_port": 554,
