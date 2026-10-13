@@ -35,13 +35,14 @@ def _ffmpeg_base() -> list[str]:
 
 
 def _tls_input_options() -> list[str]:
-    """ffmpeg TLS input options, added only when the camera is configured for TLS.
+    """ffmpeg TLS input options, added only when RTSP is configured for TLS.
 
-    ``-tls_verify`` is ffmpeg's tls-protocol option (verified with
-    ``ffmpeg -h protocol=tls``); the TLS-off path adds nothing, so the default
-    command stays byte-identical to before.
+    These are input options for the RTSP connection, not for ISAPI, so they track
+    ``rtsp_tls`` (not ``tls``). ``-tls_verify`` is ffmpeg's tls-protocol option
+    (verified with ``ffmpeg -h protocol=tls``); the RTSP-TLS-off path adds
+    nothing, so the default command stays byte-identical to before.
     """
-    if not config.CAM_TLS:
+    if not config.CAM_RTSP_TLS:
         return []
     return ["-tls_verify", "1" if config.CAM_TLS_VERIFY else "0"]
 

@@ -25,7 +25,9 @@ DEFAULT_TLS = False
 DEFAULT_TLS_VERIFY = False
 
 # Every field the camera object may carry. Unknown keys are rejected outright.
-CAMERA_KEYS = frozenset({"host", "http_port", "rtsp_port", "user", "password", "tls", "tls_verify"})
+CAMERA_KEYS = frozenset(
+    {"host", "http_port", "rtsp_port", "user", "password", "tls", "rtsp_tls", "tls_verify"}
+)
 # The top level names one camera either as "camera" or as a one-entry "cameras".
 TOP_LEVEL_KEYS = frozenset({"camera", "cameras"})
 
@@ -52,6 +54,7 @@ class CameraFields(TypedDict, total=False):
     http_port: int
     rtsp_port: int
     tls: bool
+    rtsp_tls: bool
     tls_verify: bool
 
 
@@ -65,6 +68,7 @@ class CameraSettings:
     http_port: int
     rtsp_port: int
     tls: bool
+    rtsp_tls: bool
     tls_verify: bool
 
 
@@ -136,6 +140,8 @@ def _validate_camera_fields(camera: Mapping[str, object], path: str) -> CameraFi
         fields["rtsp_port"] = _require_port(camera["rtsp_port"], "rtsp_port", path)
     if "tls" in camera:
         fields["tls"] = _require_bool(camera["tls"], "tls", path)
+    if "rtsp_tls" in camera:
+        fields["rtsp_tls"] = _require_bool(camera["rtsp_tls"], "rtsp_tls", path)
     if "tls_verify" in camera:
         fields["tls_verify"] = _require_bool(camera["tls_verify"], "tls_verify", path)
     return fields
@@ -169,6 +175,11 @@ def resolve_camera(
     Returns the resolved settings and the visible precedence notes: one line per
     field the file set that disagreed with the environment it overrode, plus a
     line when TLS has verification switched off.
+
+    ``rtsp_tls`` is independent of ``tls`` and defaults to it: omitting the key
+    keeps the two services on the same scheme (every pre-existing file behaves
+    exactly as before), while setting it lets HTTPS ISAPI pair with plain RTSP
+    on cameras that do not serve RTSPS.
     """
     notes: list[str] = []
     host = _merge_str("host", env.get("HIK_HOST"), fields.get("host"), notes)
@@ -177,10 +188,11 @@ def resolve_camera(
     http_port = _merge_int("http_port", env.get("HIK_HTTP_PORT"), fields.get("http_port"), notes)
     rtsp_port = _merge_int("rtsp_port", env.get("HIK_RTSP_PORT"), fields.get("rtsp_port"), notes)
     tls = fields.get("tls", DEFAULT_TLS)
+    rtsp_tls = fields.get("rtsp_tls", tls)
     tls_verify = fields.get("tls_verify", DEFAULT_TLS_VERIFY)
-    if tls and not tls_verify:
+    if (tls or rtsp_tls) and not tls_verify:
         notes.append("camera TLS: certificate verification is off (tls_verify: false)")
-    settings = CameraSettings(host, user, password, http_port, rtsp_port, tls, tls_verify)
+    settings = CameraSettings(host, user, password, http_port, rtsp_port, tls, rtsp_tls, tls_verify)
     return settings, notes
 
 
@@ -228,5 +240,5 @@ def isapi_base(settings: CameraSettings) -> str:
 
 
 def rtsp_base(settings: CameraSettings) -> str:
-    scheme = "rtsps" if settings.tls else "rtsp"
+    scheme = "rtsps" if settings.rtsp_tls else "rtsp"
     return f"{scheme}://{settings.host}:{settings.rtsp_port}"

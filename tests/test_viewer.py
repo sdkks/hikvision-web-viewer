@@ -1487,6 +1487,7 @@ class ConfigFileTests(unittest.TestCase):
                     "user": "viewer",
                     "password": "secret",
                     "tls": True,
+                    "rtsp_tls": False,
                     "tls_verify": False,
                 }
             }
@@ -1500,6 +1501,7 @@ class ConfigFileTests(unittest.TestCase):
                 "user": "viewer",
                 "password": "secret",
                 "tls": True,
+                "rtsp_tls": False,
                 "tls_verify": False,
             },
         )
@@ -1574,6 +1576,12 @@ class ConfigFileTests(unittest.TestCase):
             config_file.load(path)
         self.assertIn("tls", str(ctx.exception))
 
+    def test_a_non_boolean_rtsp_tls_is_refused(self):
+        path = self._write({"camera": {"rtsp_tls": "true"}})
+        with self.assertRaises(config_file.ConfigFileError) as ctx:
+            config_file.load(path)
+        self.assertIn("rtsp_tls", str(ctx.exception))
+
     # ── precedence (file over HIK_*) ─────────────────────────────────
     def test_omitted_fields_fall_back_to_the_environment(self):
         settings, notes = config_file.resolve_camera(
@@ -1647,14 +1655,51 @@ class ConfigFileTests(unittest.TestCase):
         self.assertFalse(off.tls_verify)
         self.assertFalse(default.tls_verify)  # documented default
 
+    # ── independent rtsp_tls ────────────────────────────────────────
+    def test_rtsp_tls_defaults_to_tls(self):
+        # Omitting rtsp_tls must behave exactly like the old single flag: both
+        # services follow tls, so every pre-existing file is unchanged.
+        omitted, _ = config_file.resolve_camera({}, {"tls": True})
+        explicit, _ = config_file.resolve_camera({}, {"tls": True, "rtsp_tls": True})
+        self.assertTrue(omitted.rtsp_tls)
+        self.assertEqual(config_file.rtsp_base(omitted), config_file.rtsp_base(explicit))
+        # ...and with tls off it stays off.
+        off, _ = config_file.resolve_camera({}, {"tls": False})
+        self.assertFalse(off.rtsp_tls)
+        self.assertEqual(config_file.rtsp_base(off), "rtsp://192.168.0.156:554")
+
+    def test_https_isapi_pairs_with_plain_rtsp(self):
+        # This camera serves HTTPS on 443 but no RTSPS: the useful combination.
+        settings, _ = config_file.resolve_camera(
+            {},
+            {"tls": True, "rtsp_tls": False, "http_port": 443, "rtsp_port": 554},
+        )
+        self.assertEqual(config_file.isapi_base(settings), "https://192.168.0.156:443")
+        self.assertEqual(config_file.rtsp_base(settings), "rtsp://192.168.0.156:554")
+
+    def test_plain_isapi_pairs_with_rtsps(self):
+        settings, _ = config_file.resolve_camera(
+            {},
+            {"tls": False, "rtsp_tls": True, "http_port": 80, "rtsp_port": 322},
+        )
+        self.assertEqual(config_file.isapi_base(settings), "http://192.168.0.156:80")
+        self.assertEqual(config_file.rtsp_base(settings), "rtsps://192.168.0.156:322")
+
+    def test_rtsp_tls_alone_warns_when_verification_is_off(self):
+        # TLS on either service with verification off is worth a startup note.
+        _, notes = config_file.resolve_camera({}, {"tls": False, "rtsp_tls": True})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("verification is off", notes[0])
+
 
 class StreamTlsTests(unittest.TestCase):
-    """The ffmpeg command grows TLS options only when the camera uses TLS."""
+    """The ffmpeg command grows RTSP TLS options only when rtsp_tls is on."""
 
     def test_tls_off_adds_nothing_and_keeps_todays_rtsp_url(self):
         with mock.patch.multiple(
             config,
             CAM_TLS=False,
+            CAM_RTSP_TLS=False,
             CAM_TLS_VERIFY=False,
             RTSP_SCHEME="rtsp",
             CAM_HOST="cam",
@@ -1672,6 +1717,7 @@ class StreamTlsTests(unittest.TestCase):
         with mock.patch.multiple(
             config,
             CAM_TLS=True,
+            CAM_RTSP_TLS=True,
             CAM_TLS_VERIFY=False,
             RTSP_SCHEME="rtsps",
             CAM_HOST="cam",
@@ -1686,14 +1732,59 @@ class StreamTlsTests(unittest.TestCase):
             )
 
     def test_tls_on_with_verification_asks_ffmpeg_to_verify(self):
-        with mock.patch.multiple(config, CAM_TLS=True, CAM_TLS_VERIFY=True):
+        with mock.patch.multiple(config, CAM_TLS=True, CAM_RTSP_TLS=True, CAM_TLS_VERIFY=True):
             self.assertEqual(streams._tls_input_options(), ["-tls_verify", "1"])
+
+    def test_https_isapi_keeps_plain_rtsp_and_no_verify_flag(self):
+        # The useful combination on this camera: HTTPS ISAPI, plain RTSP. The
+        # -tls_verify input options belong to the RTSP connection, so they must
+        # not appear just because ISAPI is on HTTPS.
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=True,
+            CAM_RTSP_TLS=False,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsp",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=554,
+        ):
+            self.assertEqual(streams._tls_input_options(), [])
+            live = streams._live_cmd("101", Path("/tmp/x"), True)
+            play = streams._play_cmd("20261012T194808Z", "20261012T201036Z", Path("/tmp/x"), True)
+        self.assertNotIn("-tls_verify", live)
+        self.assertNotIn("-tls_verify", play)
+        self.assertEqual(live[live.index("-i") + 1], "rtsp://u:p@cam:554/Streaming/channels/101")
+        self.assertTrue(
+            play[play.index("-i") + 1].startswith("rtsp://u:p@cam:554/Streaming/tracks/101")
+        )
+
+    def test_rtsp_tls_alone_uses_rtsps_even_when_isapi_is_plain(self):
+        with mock.patch.multiple(
+            config,
+            MOCK=False,
+            CAM_TLS=False,
+            CAM_RTSP_TLS=True,
+            CAM_TLS_VERIFY=False,
+            RTSP_SCHEME="rtsps",
+            CAM_HOST="cam",
+            CAM_USER="u",
+            CAM_PASS="p",
+            RTSP_PORT=322,
+        ):
+            self.assertEqual(streams._tls_input_options(), ["-tls_verify", "0"])
+            cmd = streams._live_cmd("101", Path("/tmp/x"), True)
+        self.assertIn("rtsps://u:p@cam:322/Streaming/channels/101", cmd[cmd.index("-i") + 1])
+        self.assertEqual(cmd[cmd.index("-tls_verify") + 1], "0")
 
     def test_tls_off_keeps_todays_live_command(self):
         with mock.patch.multiple(
             config,
             MOCK=False,
             CAM_TLS=False,
+            CAM_RTSP_TLS=False,
             RTSP_SCHEME="rtsp",
             CAM_HOST="cam",
             CAM_USER="u",
@@ -1709,6 +1800,7 @@ class StreamTlsTests(unittest.TestCase):
             config,
             MOCK=False,
             CAM_TLS=False,
+            CAM_RTSP_TLS=False,
             RTSP_SCHEME="rtsp",
             CAM_HOST="cam",
             CAM_USER="u",
@@ -1728,6 +1820,7 @@ class StreamTlsTests(unittest.TestCase):
             config,
             MOCK=False,
             CAM_TLS=True,
+            CAM_RTSP_TLS=True,
             CAM_TLS_VERIFY=False,
             RTSP_SCHEME="rtsps",
             CAM_HOST="cam",

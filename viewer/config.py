@@ -35,9 +35,12 @@ CAM_PASS = _settings.password
 HTTP_PORT = _settings.http_port
 RTSP_PORT = _settings.rtsp_port
 CAM_TLS = _settings.tls
+CAM_RTSP_TLS = _settings.rtsp_tls
 CAM_TLS_VERIFY = _settings.tls_verify
 ISAPI_SCHEME = "https" if CAM_TLS else "http"
-RTSP_SCHEME = "rtsps" if CAM_TLS else "rtsp"
+# rtsp_tls defaults to tls, so an older file without it keeps both services on
+# the same scheme; the two can differ when ISAPI is HTTPS but RTSPS is absent.
+RTSP_SCHEME = "rtsps" if CAM_RTSP_TLS else "rtsp"
 MOCK = os.environ.get("HIK_MOCK", "") == "1"
 DEFAULT_CHANNEL = os.environ.get("VIEWER_DEFAULT_CHANNEL", "101")
 # Optional HTTP Basic Auth for the viewer itself. When both are set, every
