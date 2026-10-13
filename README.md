@@ -173,10 +173,18 @@ JavaScript or not.
   time, and it is hidden while playback is paused or stalled rather than showing a confident number;
   it can run a few seconds ahead of the picture, because the browser buffers behind the stream.
 - The camera allows **one** playback session; starting a new one takes over the old.
-- **A download is the camera's own file, not a trimmed export.** `ContentMgmt/download` streams the
-  stored recording that contains the point you asked for, in the camera's own container, at roughly
-  4x realtime; the camera does not cut it to the exact range, so a download can cover more time than
-  the range you picked. The filename names the point you asked for, not a clip cut to it.
+- **A download prefers the camera's own file, and never trims it.** `ContentMgmt/download` streams
+  the stored recording that contains the point you asked for, in the camera's own container, at
+  roughly 4x realtime; the camera does not cut it to the exact range, so a download can cover more
+  time than the range you picked. The filename names the point you asked for, not a clip cut to it.
+- **A download has two ways through, and neither fakes completeness.** When that export refuses or
+  sends nothing — this firmware can answer every request with `400 Invalid XML Content` while the
+  recordings themselves are healthy — the viewer instead remuxes the RTSP playback track into a
+  fragmented MP4, at realtime rather than 4x. It withholds its reply until the bytes contain a media
+  fragment, so an init-only or empty answer becomes the same typed error card as any other failed
+  download, never a file that looks complete and plays nothing; a stall after media has started ends
+  the transfer, leaving a file that is valid up to the cut. The camera allows one playback session,
+  so a running playback is asked to stop before the fallback borrows it.
 - Recording search is served by the camera's app layer, which on some firmware is unreliable —
   the UI names that state instead of pretending it is "no clips".
 

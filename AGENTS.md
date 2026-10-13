@@ -14,8 +14,11 @@ vendor cloud or app**:
 
 - **Live view** — main/sub channel, streamed as HLS (fragmented TS) to the browser
 - **Recordings** — ISAPI search over the SD card, in-browser playback, clip download
-- **Downloads** — full clips over HTTP via ISAPI's `ContentMgmt/download` (~4x realtime), offered
-  from the picker and from the player
+- **Downloads** — full clips over HTTP: ISAPI's `ContentMgmt/download` first (~4x realtime), with an
+  RTSP-playback remux fallback (fragmented MP4, realtime) when the export refuses or sends nothing.
+  The fallback holds its reply until the bytes contain media, so an init-only or media-free answer is
+  a typed error card carrying ffmpeg's stderr, never a file that looks complete and plays nothing.
+  Offered from the picker and from the player
 - **Motion zones** — read/paint the camera's motion-detection grid (18x22) over a still,
   set sensitivity, toggle detection, apply with a readback
 - No cloud dependency, no accounts, LAN-only by default
@@ -38,7 +41,7 @@ Browser: static/app.js (hls.js) ────────────────
 | Path | Responsibility |
 |---|---|
 | `viewer/camera.py` | ISAPI client, error model, `MockCamera` fixtures, codec/resolution detection |
-| `viewer/streams.py` | ffmpeg HLS session manager: spawn/kill, codec decision, watchdog, reaper |
+| `viewer/streams.py` | ffmpeg session manager: HLS spawn/kill, codec decision, watchdog, reaper; download fallback remux |
 | `viewer/app.py` | stdlib `ThreadingHTTPServer`: routes, auth gate, page rendering |
 | `viewer/templates.py` | Server-rendered HTML (string templates, no framework) |
 | `viewer/config.py` | Environment configuration (single source of truth) |
