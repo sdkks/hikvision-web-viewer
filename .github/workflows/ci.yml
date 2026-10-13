@@ -30,7 +30,9 @@ jobs:
         with:
           python-version: "3.14"
 
-      - uses: astral-sh/setup-uv@v10
+      # Exact version, not a major alias: astral-sh/setup-uv publishes no moving
+      # major tags, so "@v10" cannot resolve ("unable to find version v10").
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           version: "0.11.16"
           enable-cache: true
